@@ -1,5 +1,6 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 import os
+from functools import wraps
 from dotenv import load_dotenv
 from trading_bot import TradingBot
 import threading
@@ -14,10 +15,35 @@ BINANCE_SECRET = os.getenv('BINANCE_SECRET')
 
 bot = TradingBot(BINANCE_API, BINANCE_SECRET)
 
+def check_auth(username, password):
+    """Checks if the username and password combination is valid."""
+    return username == 'admin' and password == 'Giusy.7@'
+
+def authenticate():
+    """Sends a 401 response that enables basic auth."""
+    return Response(
+        'Could not verify your access level for that URL.\n'
+        'You have to login with proper credentials', 401,
+        {'WWW-Authenticate': 'Basic realm="Login Required"'})
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
+
 @app.route('/')
 @app.route('/index.html')
 def index():
     return render_template('index.html')
+
+@app.route('/admin')
+@requires_auth
+def admin():
+    return render_template('admin.html')
 
 @app.route('/api/status')
 def status():
@@ -32,6 +58,7 @@ def stats():
     })
 
 @app.route('/api/start', methods=['POST'])
+@requires_auth
 def start_bot():
     if not bot.is_running:
         bot.start()
@@ -39,6 +66,7 @@ def start_bot():
     return jsonify({'status': 'already_running'})
 
 @app.route('/api/stop', methods=['POST'])
+@requires_auth
 def stop_bot():
     if bot.is_running:
         bot.stop()
@@ -46,6 +74,7 @@ def stop_bot():
     return jsonify({'status': 'not_running'})
 
 @app.route('/api/config', methods=['POST'])
+@requires_auth
 def update_config():
     data = request.json
 
