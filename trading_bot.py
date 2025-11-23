@@ -170,32 +170,22 @@ class TradingBot:
                     if symbol not in self.active_trades:
                         self.log(f"♻️ Trovata posizione orfana: {symbol} ({qty} {coin} - {value_eur:.2f}€). Recupero...")
 
-                        # Recuperiamo ATR per SL/TP
-                        df = self.fetch_ohlcv(symbol, limit=self.ATR_PERIOD * 2)
-                        atr = 0.0
-                        if df is not None and not pd.isna(df.iloc[-1]['atr']):
-                             atr = df.iloc[-1]['atr']
-
-                        atr_sl = atr * self.ATR_SL_MULTIPLIER if atr > 0 else current_price * 0.02
-                        # atr_tp = atr * self.ATR_TP_MULTIPLIER if atr > 0 else current_price * 0.03 # Unused, using fixed TP
-
                         is_dust = value_eur < self.DUST_THRESHOLD_EUR
 
                         self.active_trades[symbol] = {
                             'entry_price': current_price, # Approssimazione
+                            'highest_price': current_price, # Init per Trailing
                             'entry_time': datetime.now(),
                             'quantity': qty,
-                            'sl_price': current_price - atr_sl,
-                            'tp_price': current_price * (1 + self.FIXED_TP_PERCENTAGE),
                             'recovered': True,
                             'is_dust': is_dust
                         }
                     else:
                         # Aggiorniamo la quantità reale se differisce (es. parziali fill)
                         self.active_trades[symbol]['quantity'] = qty
-                        # Forziamo l'aggiornamento del TP anche qui per sicurezza
-                        if self.active_trades[symbol].get('entry_price', 0) > 0:
-                            self.active_trades[symbol]['tp_price'] = self.active_trades[symbol]['entry_price'] * (1 + self.FIXED_TP_PERCENTAGE)
+                        # Init highest_price if missing
+                        if 'highest_price' not in self.active_trades[symbol]:
+                            self.active_trades[symbol]['highest_price'] = self.active_trades[symbol].get('entry_price', current_price)
 
             # Pulizia inversa: Se abbiamo un trade in memoria ma saldo 0, lo rimuoviamo
             to_remove = []
