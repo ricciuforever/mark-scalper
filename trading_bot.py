@@ -42,8 +42,7 @@ class TradingBot:
 
         # Whitelist estesa
         self.whitelist = initial_whitelist if initial_whitelist else [
-            'BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'DOGE', 'LINK', 'LTC', 'SUI',
-            'AVAX', 'BCH', 'DOT', 'SHIB', 'TRX', 'ARB', 'APT', 'GALA', 'ATOM', 'EGLD', 'POL'
+            'BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'DOGE'
         ]
         self.quote_currency = 'EUR'
         self.timeframe = '1m' # 1m for trigger, 5m for trend
