@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Binance Scalper Bot - Admin{% endblock %}
+
+{% block subtitle %}ADMIN PANEL{% endblock %}
+
+{% block control_panel %}
+            <div class="card">
+                <div class="card-header fw-bold">Control Panel</div>
+                <div class="card-body">
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                        <div>
+                            <div id="statusDot" class="status-indicator status-stopped"></div>
+                            <span id="currentAction" class="text-muted">Idle</span>
+                        </div>
+                    </div>
+
+                    <div class="d-grid gap-2 mb-3">
+                        <button id="btnStart" class="btn btn-success" onclick="startBot()">START TRADING</button>
+                        <button id="btnStop" class="btn btn-danger" onclick="stopBot()">STOP</button>
+                    </div>
+                    <hr>
+                    <div class="mb-3">
+                        <label class="form-label">Trade Size (€)</label>
+                        <input type="number" id="tradeSizeInput" class="form-control" value="10" onchange="updateConfig()">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Whitelist</label>
+                        <textarea id="whitelistInput" class="form-control form-control-sm" rows="6" onchange="updateConfig()">BTC, ETH, SOL, XRP, BNB, ADA, DOGE, LINK, LTC, SUI, AVAX, BCH, LTC, DOT, LINK, SHIB, PEPE, TRX, GRT, GMT, S, TRUMP, ARB, APT, GALA, WIF, OP, PNUT, ATOM, EGLD, WIN, WLFI, WLD, POL, VET, RENDER, XLM, ICP, NEAR</textarea>
+                    </div>
+                </div>
+            </div>
+{% endblock %}
+
+{% block extra_scripts %}
+    function startBot() { fetch('api/start', { method: 'POST' }); }
+    function stopBot() { fetch('api/stop', { method: 'POST' }); }
+
+    function updateConfig() {
+        const whitelist = document.getElementById('whitelistInput').value;
+        const size = document.getElementById('tradeSizeInput').value;
+        fetch('api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ whitelist: whitelist, trade_size: size })
+        });
+    }
+{% endblock %}
