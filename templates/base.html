@@ -191,8 +191,11 @@
                         const t = trades[sym];
 
                         const pnlColor = t.pnl_abs >= 0 ? 'text-success' : 'text-danger';
+
+                        // FIX: Use correctly mapped UI fields
                         const slPrice = t.sl_price ? t.sl_price.toFixed(4) : 'N/A';
-                        const tpPrice = t.tp_price ? t.tp_price.toFixed(4) : 'N/A';
+                        const tpPrice = t.tp_price_display ? t.tp_price_display : (t.tp_price ? t.tp_price.toFixed(4) : 'Dynamic');
+
                         // Current Price è inizializzato a 0.0 nel backend se manca,
                         // ma per display usiamo '...' se è ancora 0 per indicare caricamento.
                         const currentPriceDisplay = t.current_price > 0 ? t.current_price.toFixed(4) : '...';
@@ -210,7 +213,9 @@
                             <td>${symbolDisplay}</td>
                             <td>${investedValue}€</td> <td>${t.entry_price.toFixed(4)}</td>
                             <td>${currentPriceDisplay}</td>
-                            <td class="text-danger">${slPrice}</td> <td class="text-success">${tpPrice}</td> <td class="${pnlColor}">${(t.pnl_pct * 100).toFixed(2)}%</td>
+                            <td class="text-danger">${slPrice}</td>
+                            <td class="text-success">${tpPrice}</td>
+                            <td class="${pnlColor}">${(t.pnl_pct * 100).toFixed(2)}%</td>
                             <td class="${pnlColor} fw-bold">${t.pnl_abs.toFixed(2)}€</td>
                             <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
                         </tr>`;

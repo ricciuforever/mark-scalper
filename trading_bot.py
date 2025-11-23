@@ -583,6 +583,25 @@ class TradingBot:
              if trade.get('error_state'):
                  trade_copy['reason_display'] = "⚠️ SELL ERROR - RETRYING"
 
+             # Map Internal Safety SL to UI 'sl_price'
+             trade_copy['sl_price'] = trade.get('safety_sl_price', 0.0)
+
+             # Prepare UI Display for Dynamic TP
+             entry = trade.get('entry_price', 0.0)
+             highest = trade.get('highest_price', entry)
+             profit_pct = (highest - entry) / entry if entry > 0 else 0
+
+             if profit_pct >= self.DYNAMIC_TP_TRIGGER:
+                 # Trailing Active: Show current stop price
+                 current_tp = highest * (1 - self.DYNAMIC_TP_STEP)
+                 trade_copy['tp_price_display'] = f"{current_tp:.4f} (Active)"
+                 trade_copy['tp_price'] = current_tp # Numeric for fallback
+             else:
+                 # Trailing Inactive: Show Activation Price
+                 activation_price = entry * (1 + self.DYNAMIC_TP_TRIGGER)
+                 trade_copy['tp_price_display'] = f"> {activation_price:.4f}"
+                 trade_copy['tp_price'] = activation_price
+
              active_trades_data[sym] = trade_copy
 
         # 3. Equity Totale Reale
