@@ -58,6 +58,7 @@ class TradingBot:
         self.ATR_SL_MULTIPLIER = 2.0
         self.ATR_TP_MULTIPLIER = 3.0
         self.ATR_PERIOD = 14
+        self.FIXED_TP_PERCENTAGE = 0.005  # Default TP 0.5%
 
         self.is_running = False
         self.logs = []
@@ -172,7 +173,7 @@ class TradingBot:
                              atr = df.iloc[-1]['atr']
 
                         atr_sl = atr * self.ATR_SL_MULTIPLIER if atr > 0 else current_price * 0.02
-                        atr_tp = atr * self.ATR_TP_MULTIPLIER if atr > 0 else current_price * 0.03
+                        # atr_tp = atr * self.ATR_TP_MULTIPLIER if atr > 0 else current_price * 0.03 # Unused, using fixed TP
 
                         is_dust = value_eur < self.DUST_THRESHOLD_EUR
 
@@ -181,7 +182,7 @@ class TradingBot:
                             'entry_time': datetime.now(),
                             'quantity': qty,
                             'sl_price': current_price - atr_sl,
-                            'tp_price': current_price + atr_tp,
+                            'tp_price': current_price * (1 + self.FIXED_TP_PERCENTAGE),
                             'recovered': True,
                             'is_dust': is_dust
                         }
@@ -356,7 +357,7 @@ class TradingBot:
             avg_price = quote_spent / executed_qty if executed_qty > 0 else price
 
             atr_sl_distance = atr_value * self.ATR_SL_MULTIPLIER
-            atr_tp_distance = atr_value * self.ATR_TP_MULTIPLIER
+            # atr_tp_distance = atr_value * self.ATR_TP_MULTIPLIER # Unused
 
             position_value_eur = avg_price * executed_qty
             is_dust = position_value_eur < self.DUST_THRESHOLD_EUR
@@ -366,7 +367,7 @@ class TradingBot:
                 'entry_time': datetime.now(),
                 'quantity': executed_qty,
                 'sl_price': avg_price - atr_sl_distance,
-                'tp_price': avg_price + atr_tp_distance,
+                'tp_price': avg_price * (1 + self.FIXED_TP_PERCENTAGE),
                 'is_dust': is_dust,
                 'error_state': False
             }
