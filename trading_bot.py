@@ -66,6 +66,12 @@ class TradingBot:
         self.current_status = "Idle"
 
         self.active_trades = self.load_active_trades()
+
+        # Aggiorna TP per i trade esistenti caricati
+        for sym, trade in self.active_trades.items():
+            if trade.get('entry_price', 0) > 0:
+                trade['tp_price'] = trade['entry_price'] * (1 + self.FIXED_TP_PERCENTAGE)
+
         self.recently_closed = []
 
         self.historical_trades_cache = self.load_historical_trades()
@@ -189,6 +195,9 @@ class TradingBot:
                     else:
                         # Aggiorniamo la quantità reale se differisce (es. parziali fill)
                         self.active_trades[symbol]['quantity'] = qty
+                        # Forziamo l'aggiornamento del TP anche qui per sicurezza
+                        if self.active_trades[symbol].get('entry_price', 0) > 0:
+                            self.active_trades[symbol]['tp_price'] = self.active_trades[symbol]['entry_price'] * (1 + self.FIXED_TP_PERCENTAGE)
 
             # Pulizia inversa: Se abbiamo un trade in memoria ma saldo 0, lo rimuoviamo
             to_remove = []
