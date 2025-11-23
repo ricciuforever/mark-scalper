@@ -56,6 +56,11 @@ class TradingBot:
         self.ATR_PERIOD = 14
         self.VOLATILITY_THRESHOLD = 0.0005 # Min ATR/Price ratio
 
+        # Dynamic Trailing Take Profit Config
+        # "Dynamic TP" as requested: Acts as a trailing exit that locks in profit.
+        self.DYNAMIC_TP_TRIGGER = 0.005 # Start trailing ONLY after 0.5% profit
+        self.DYNAMIC_TP_STEP = 0.002    # Follow price at 0.2% distance
+
         self.is_running = False
         self.logs = []
         self.lock = threading.Lock()
@@ -63,18 +68,15 @@ class TradingBot:
 
         self.active_trades = self.load_active_trades()
 
-        # Backward compatibility for restored trades (Migration to Fixed SL/TP)
+        # Backward compatibility / Restore state
         for sym, trade in self.active_trades.items():
-            if 'tp_price' not in trade:
-                 # Fallback safe defaults to avoid crash (1% TP, 1% SL)
-                 # These will likely be closed quickly or manually, but prevents loop error
-                 entry = trade.get('entry_price', 0.0)
-                 trade['tp_price'] = entry * 1.01
-                 trade['sl_price'] = entry * 0.99
+            # Ensure trailing state tracking
+            if 'highest_price' not in trade:
+                trade['highest_price'] = trade.get('entry_price', 0.0)
 
-            # Remove obsolete keys if present
-            if 'highest_price' in trade:
-                del trade['highest_price']
+            if 'safety_sl_price' not in trade:
+                 entry = trade.get('entry_price', 0.0)
+                 trade['safety_sl_price'] = trade.get('sl_price', entry * 0.99) # Migration/Default safety
 
         self.recently_closed = []
 
@@ -189,16 +191,14 @@ class TradingBot:
                         if atr == 0:
                              atr = current_price * 0.005 # Fallback 0.5% volatility est.
 
-                        sl_price = current_price - (atr * 1.5)
-                        tp_price = current_price + (atr * 2.5)
+                        safety_sl_price = current_price * 0.99 # Hard Safety Stop
                         is_dust = value_eur < self.DUST_THRESHOLD_EUR
 
                         self.active_trades[symbol] = {
                             'entry_price': current_price, # Approssimazione
                             'entry_time': datetime.now(),
                             'quantity': qty,
-                            'sl_price': sl_price,
-                            'tp_price': tp_price,
+                            'safety_sl_price': safety_sl_price,
                             'recovered': True,
                             'is_dust': is_dust
                         }
@@ -206,10 +206,9 @@ class TradingBot:
                         # Aggiorniamo la quantità reale se differisce (es. parziali fill)
                         self.active_trades[symbol]['quantity'] = qty
 
-                        # Ensure SL/TP exist (Migration Check)
-                        if 'tp_price' not in self.active_trades[symbol]:
-                             self.active_trades[symbol]['tp_price'] = self.active_trades[symbol]['entry_price'] * 1.01
-                             self.active_trades[symbol]['sl_price'] = self.active_trades[symbol]['entry_price'] * 0.99
+                        # Ensure SL exist (Migration Check)
+                        if 'safety_sl_price' not in self.active_trades[symbol]:
+                             self.active_trades[symbol]['safety_sl_price'] = self.active_trades[symbol].get('sl_price', self.active_trades[symbol]['entry_price'] * 0.99)
 
             # Pulizia inversa: Se abbiamo un trade in memoria ma saldo 0, lo rimuoviamo
             to_remove = []
@@ -264,23 +263,37 @@ class TradingBot:
         true_range = ranges.max(axis=1)
         df['atr'] = true_range.ewm(span=self.ATR_PERIOD, min_periods=self.ATR_PERIOD).mean()
 
-        if interval == '5m':
-             # EMA 200 for Trend
-             df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
+        if interval == '15m':
+             # Trend Filter: EMA 99 on 15m
+             df['ema_99'] = df['close'].ewm(span=99, adjust=False).mean()
 
         if interval == '1m':
-             # StochRSI for Trigger
+             # Trend Scalper Indicators (1m)
+             df['ema_7'] = df['close'].ewm(span=7, adjust=False).mean()
+             df['ema_25'] = df['close'].ewm(span=25, adjust=False).mean()
+             df['ema_99'] = df['close'].ewm(span=99, adjust=False).mean()
+
+             # StochRSI (14, 14, 3, 3) - Flexible
+             # RSI length = 14, Stoch length = 14, K = 3, D = 3
+             rsi_period = 14
+             stoch_period = 14
+             k_period = 3
+             d_period = 3
+
              delta = df['close'].diff()
-             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-             loss = (-delta.where(delta < 0, 0)).rolling(14).mean().replace(0, 0.000001)
+             gain = (delta.where(delta > 0, 0)).rolling(rsi_period).mean()
+             loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean().replace(0, 0.000001)
              rs = gain / loss
              df['rsi'] = 100 - (100 / (1 + rs))
 
-             min_rsi = df['rsi'].rolling(14).min()
-             max_rsi = df['rsi'].rolling(14).max()
+             min_rsi = df['rsi'].rolling(stoch_period).min()
+             max_rsi = df['rsi'].rolling(stoch_period).max()
              df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi).replace(0, 0.000001)
-             df['stoch_k'] = df['stoch_rsi'].rolling(3).mean() * 100
-             df['stoch_d'] = df['stoch_k'].rolling(3).mean()
+
+             # K line
+             df['stoch_k'] = df['stoch_rsi'].rolling(k_period).mean() * 100
+             # D line
+             df['stoch_d'] = df['stoch_k'].rolling(d_period).mean()
 
         return df
 
@@ -314,6 +327,11 @@ class TradingBot:
         if curr == 0.0: return
 
         trade['current_price'] = curr
+
+        # Track Highest Price for Trailing
+        if curr > trade.get('highest_price', 0.0):
+            trade['highest_price'] = curr
+
         trade['pnl_pct'] = (curr - trade['entry_price']) / trade['entry_price']
         trade['pnl_abs'] = (curr - trade['entry_price']) * trade['quantity']
 
@@ -359,23 +377,23 @@ class TradingBot:
         self.save_active_trades()
 
     def scan_for_entry(self, symbol):
-        # Controllo sicurezza: non aprire se ho già MAX_TRADES aperti
+        # Controllo sicurezza
         if len([t for t in self.active_trades.values() if not t.get('is_dust')]) >= 10:
             return
 
-        # 1. Fetch 5m for Trend
-        df_5m = self.fetch_ohlcv(symbol, '5m')
-        if df_5m is None: return
-        df_5m = self.calculate_indicators(df_5m, '5m')
-        last_5m = df_5m.iloc[-1]
+        # 1. Trend Filter (15m) - High Level Direction
+        df_15m = self.fetch_ohlcv(symbol, '15m')
+        if df_15m is None: return
+        df_15m = self.calculate_indicators(df_15m, '15m')
+        last_15m = df_15m.iloc[-1]
 
-        if pd.isna(last_5m['ema_200']): return
+        if pd.isna(last_15m['ema_99']): return
 
-        # Trend Condition: Price > EMA 200 (Long Only)
-        if last_5m['close'] <= last_5m['ema_200']:
-             return # Trend is DOWN, ignore.
+        # Higher Timeframe Trend Condition
+        if last_15m['close'] <= last_15m['ema_99']:
+            return # Trend is DOWN/WEAK on 15m, ignore.
 
-        # 2. Fetch 1m for Trigger
+        # 2. Execution Trigger (1m)
         df_1m = self.fetch_ohlcv(symbol, '1m')
         if df_1m is None: return
         df_1m = self.calculate_indicators(df_1m, '1m')
@@ -384,25 +402,19 @@ class TradingBot:
         curr_1m = df_1m.iloc[-1]
         prev_1m = df_1m.iloc[-2]
 
-        if pd.isna(curr_1m['stoch_k']) or pd.isna(curr_1m['stoch_d']): return
+        if pd.isna(curr_1m['ema_99']) or pd.isna(curr_1m['stoch_k']): return
 
-        # Volatility Filter
-        atr_1m = curr_1m['atr']
-        price = curr_1m['close']
-        if (atr_1m / price) < self.VOLATILITY_THRESHOLD:
-             return # Too flat
+        # Trend Alignment 1m (EMA 7 > 25 > 99) "Crescendo"
+        is_aligned = curr_1m['ema_7'] > curr_1m['ema_25'] > curr_1m['ema_99']
 
-        # Trigger Condition: StochRSI Cross Up in Oversold Area (< 20)
-        # Check Cross: Previous K < D AND Current K > D
-        # Check Oversold: Previous K < 20
-
+        # StochRSI Pullback Trigger
         k_cross_up = prev_1m['stoch_k'] < prev_1m['stoch_d'] and curr_1m['stoch_k'] > curr_1m['stoch_d']
         is_oversold = prev_1m['stoch_k'] < 20
 
-        if k_cross_up and is_oversold:
-            self.execute_buy(symbol, price, atr_1m)
+        if is_aligned and k_cross_up and is_oversold:
+            self.execute_buy(symbol, curr_1m['close'])
 
-    def execute_buy(self, symbol, price, atr_1m):
+    def execute_buy(self, symbol, price):
         if not self.client: return
 
         try:
@@ -413,26 +425,27 @@ class TradingBot:
             quote_spent = float(order['cummulativeQuoteQty'])
             avg_price = quote_spent / executed_qty if executed_qty > 0 else price
 
-            # Set & Forget Logic (SL 1.5 ATR, TP 2.5 ATR)
-            sl_price = avg_price - (atr_1m * 1.5)
-            tp_price = avg_price + (atr_1m * 2.5)
+            # Risk Management (Trend-Scalper)
+            # We use a Dynamic Trailing TP (starts after +0.5%) and a Fixed Safety SL (-1%)
+
+            safety_sl_price = avg_price * 0.99 # Fixed -1% Safety Stop
 
             position_value_eur = avg_price * executed_qty
             is_dust = position_value_eur < self.DUST_THRESHOLD_EUR
 
             self.active_trades[symbol] = {
                 'entry_price': avg_price,
+                'highest_price': avg_price, # Tracking for Dynamic TP
                 'entry_time': datetime.now(),
                 'quantity': executed_qty,
-                'sl_price': sl_price,
-                'tp_price': tp_price,
+                'safety_sl_price': safety_sl_price, # Hard safety stop
                 'is_dust': is_dust,
                 'error_state': False
             }
             if is_dust:
                 self.log(f"🧹 OPENED DUST {symbol}")
             else:
-                self.log(f"✅ OPENED {symbol} | TP: {tp_price:.4f} | SL: {sl_price:.4f}")
+                self.log(f"✅ OPENED {symbol} | Scalping Trend...")
 
         except Exception as e:
             self.log(f"❌ Buy Failed {symbol}: {e}")
@@ -440,15 +453,31 @@ class TradingBot:
     def manage_trade(self, symbol):
         trade = self.active_trades[symbol]
         curr = trade.get('current_price', 0.0)
+        entry = trade.get('entry_price', 0.0)
+        highest = trade.get('highest_price', entry)
 
-        # Set & Forget Exit Logic
-        if curr >= trade['tp_price']:
-            self.execute_sell(symbol, curr, "Take Profit")
-            return
+        # 1. Update Highest Price
+        if curr > highest:
+             trade['highest_price'] = curr
+             highest = curr
 
-        if curr <= trade['sl_price']:
-             self.execute_sell(symbol, curr, "Stop Loss")
-             return
+        # 2. Dynamic Trailing Take Profit (Dynamic TP)
+        # Activate trailing ONLY after profit > DYNAMIC_TP_TRIGGER
+        profit_pct = (highest - entry) / entry
+
+        if profit_pct >= self.DYNAMIC_TP_TRIGGER:
+            # Dynamic TP Logic: Follow price with DYNAMIC_TP_STEP distance
+            dynamic_tp_price = highest * (1 - self.DYNAMIC_TP_STEP)
+
+            if curr <= dynamic_tp_price:
+                self.execute_sell(symbol, curr, f"Dynamic TP Hit (+{profit_pct*100:.2f}%)")
+                return
+        else:
+            # Pre-Trailing: Use Hard Safety Stop
+            safety_stop = trade.get('safety_sl_price', entry * 0.99)
+            if curr <= safety_stop:
+                self.execute_sell(symbol, curr, "Safety Stop Loss")
+                return
 
     def archive_and_delete(self, symbol, price, reason, pnl_abs, pnl_pct):
         # Archivia nello storico
