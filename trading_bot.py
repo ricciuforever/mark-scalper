@@ -46,7 +46,7 @@ class TradingBot:
             'AVAX', 'BCH', 'DOT', 'SHIB', 'TRX', 'ARB', 'APT', 'GALA', 'ATOM', 'EGLD', 'POL'
         ]
         self.quote_currency = 'EUR'
-        self.timeframe = '15m'
+        self.timeframe = '1m' # 1m for trigger, 5m for trend
         self.trade_size = 100.0
 
         # --- Configurazione Dust ---
@@ -54,8 +54,7 @@ class TradingBot:
 
         # --- Strategy Configuration ---
         self.ATR_PERIOD = 14
-        self.TRAILING_DEV_PCT = 0.02
-        self.INITIAL_SL_PCT = 0.03
+        self.VOLATILITY_THRESHOLD = 0.0005 # Min ATR/Price ratio
 
         self.is_running = False
         self.logs = []
@@ -218,13 +217,12 @@ class TradingBot:
             if len(self.logs) > 200: self.logs.pop()
         print(entry)
 
-    def fetch_ohlcv(self, symbol, limit=300):
+    def fetch_ohlcv(self, symbol, interval, limit=300):
         if not self.client: return None
         try:
-            klines = self.client.klines(symbol, self.timeframe, limit=limit)
+            klines = self.client.klines(symbol, interval, limit=limit)
             df = pd.DataFrame(klines, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'ct', 'qav', 'n', 'tbv', 'tqv', 'i'])
             df[['open', 'high', 'low', 'close', 'vol']] = df[['open', 'high', 'low', 'close', 'vol']].astype(float)
-            df = self.calculate_indicators(df)
             return df
         except Exception as e:
             if "429" in str(e) or "503" in str(e):
@@ -232,22 +230,32 @@ class TradingBot:
                 time.sleep(10)
             return None
 
-    def calculate_indicators(self, df):
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean().replace(0, 0.000001)
-        rs = gain / loss
-        df['rsi'] = 100 - (100 / (1 + rs))
-
-        # EMA Indicators for Trend
-        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
-
+    def calculate_indicators(self, df, interval):
+        # ATR Calculation (Common)
         high_low = df['high'] - df['low']
         high_close = np.abs(df['high'] - df['close'].shift())
         low_close = np.abs(df['low'] - df['close'].shift())
         ranges = pd.concat([high_low, high_close, low_close], axis=1)
         true_range = ranges.max(axis=1)
         df['atr'] = true_range.ewm(span=self.ATR_PERIOD, min_periods=self.ATR_PERIOD).mean()
+
+        if interval == '5m':
+             # EMA 200 for Trend
+             df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
+
+        if interval == '1m':
+             # StochRSI for Trigger
+             delta = df['close'].diff()
+             gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+             loss = (-delta.where(delta < 0, 0)).rolling(14).mean().replace(0, 0.000001)
+             rs = gain / loss
+             df['rsi'] = 100 - (100 / (1 + rs))
+
+             min_rsi = df['rsi'].rolling(14).min()
+             max_rsi = df['rsi'].rolling(14).max()
+             df['stoch_rsi'] = (df['rsi'] - min_rsi) / (max_rsi - min_rsi).replace(0, 0.000001)
+             df['stoch_k'] = df['stoch_rsi'].rolling(3).mean() * 100
+             df['stoch_d'] = df['stoch_k'].rolling(3).mean()
 
         return df
 
@@ -281,11 +289,6 @@ class TradingBot:
         if curr == 0.0: return
 
         trade['current_price'] = curr
-
-        # Trailing Logic Update
-        if curr > trade.get('highest_price', 0.0):
-            trade['highest_price'] = curr
-
         trade['pnl_pct'] = (curr - trade['entry_price']) / trade['entry_price']
         trade['pnl_abs'] = (curr - trade['entry_price']) * trade['quantity']
 
@@ -296,19 +299,17 @@ class TradingBot:
             except Exception as e:
                 self.log(f"Loop Error: {e}")
 
-            for _ in range(5):
+            # Faster Loop (High Frequency)
+            for _ in range(10): # 10 seconds wait
                 if not self.is_running: break
                 time.sleep(1)
 
     def process_cycle(self):
         pairs = self.get_whitelist_pairs()
 
-        # Aggiorniamo cache info exchange occasionalmente (ogni 100 cicli circa) se necessario
-        # qui lo diamo per buono all'init per performance
-
         for symbol in pairs:
             if not self.is_running: break
-            time.sleep(1.0) # Leggera pausa
+            time.sleep(0.1) # Fast scan
 
             active_trade = self.active_trades.get(symbol)
 
@@ -333,28 +334,50 @@ class TradingBot:
         self.save_active_trades()
 
     def scan_for_entry(self, symbol):
-        # Controllo sicurezza: non aprire se ho già MAX_TRADES aperti (opzionale, metto 10)
+        # Controllo sicurezza: non aprire se ho già MAX_TRADES aperti
         if len([t for t in self.active_trades.values() if not t.get('is_dust')]) >= 10:
             return
 
-        df = self.fetch_ohlcv(symbol)
-        if df is None or len(df) < 200: return
+        # 1. Fetch 5m for Trend
+        df_5m = self.fetch_ohlcv(symbol, '5m')
+        if df_5m is None: return
+        df_5m = self.calculate_indicators(df_5m, '5m')
+        last_5m = df_5m.iloc[-1]
 
-        last = df.iloc[-1]
+        if pd.isna(last_5m['ema_200']): return
 
-        # Trend Following Strategy:
-        # 1. Trend must be UP (Price > EMA 200)
-        # 2. Pullback must be significant (RSI < 40)
+        # Trend Condition: Price > EMA 200 (Long Only)
+        if last_5m['close'] <= last_5m['ema_200']:
+             return # Trend is DOWN, ignore.
 
-        if pd.isna(last['ema_200']) or pd.isna(last['rsi']): return
+        # 2. Fetch 1m for Trigger
+        df_1m = self.fetch_ohlcv(symbol, '1m')
+        if df_1m is None: return
+        df_1m = self.calculate_indicators(df_1m, '1m')
 
-        is_uptrend = last['close'] > last['ema_200']
-        is_pullback = last['rsi'] < 40
+        if len(df_1m) < 2: return
+        curr_1m = df_1m.iloc[-1]
+        prev_1m = df_1m.iloc[-2]
 
-        if is_uptrend and is_pullback:
-            self.execute_buy(symbol, last['close'])
+        if pd.isna(curr_1m['stoch_k']) or pd.isna(curr_1m['stoch_d']): return
 
-    def execute_buy(self, symbol, price):
+        # Volatility Filter
+        atr_1m = curr_1m['atr']
+        price = curr_1m['close']
+        if (atr_1m / price) < self.VOLATILITY_THRESHOLD:
+             return # Too flat
+
+        # Trigger Condition: StochRSI Cross Up in Oversold Area (< 20)
+        # Check Cross: Previous K < D AND Current K > D
+        # Check Oversold: Previous K < 20
+
+        k_cross_up = prev_1m['stoch_k'] < prev_1m['stoch_d'] and curr_1m['stoch_k'] > curr_1m['stoch_d']
+        is_oversold = prev_1m['stoch_k'] < 20
+
+        if k_cross_up and is_oversold:
+            self.execute_buy(symbol, price, atr_1m)
+
+    def execute_buy(self, symbol, price, atr_1m):
         if not self.client: return
 
         try:
@@ -365,21 +388,26 @@ class TradingBot:
             quote_spent = float(order['cummulativeQuoteQty'])
             avg_price = quote_spent / executed_qty if executed_qty > 0 else price
 
+            # Set & Forget Logic (SL 1.5 ATR, TP 2.5 ATR)
+            sl_price = avg_price - (atr_1m * 1.5)
+            tp_price = avg_price + (atr_1m * 2.5)
+
             position_value_eur = avg_price * executed_qty
             is_dust = position_value_eur < self.DUST_THRESHOLD_EUR
 
             self.active_trades[symbol] = {
                 'entry_price': avg_price,
-                'highest_price': avg_price, # Init for Trailing
                 'entry_time': datetime.now(),
                 'quantity': executed_qty,
+                'sl_price': sl_price,
+                'tp_price': tp_price,
                 'is_dust': is_dust,
                 'error_state': False
             }
             if is_dust:
-                self.log(f"🧹 OPENED DUST {symbol} | Value: {position_value_eur:.4f}€")
+                self.log(f"🧹 OPENED DUST {symbol}")
             else:
-                self.log(f"✅ OPENED LONG {symbol} | Price: {avg_price:.4f}")
+                self.log(f"✅ OPENED {symbol} | TP: {tp_price:.4f} | SL: {sl_price:.4f}")
 
         except Exception as e:
             self.log(f"❌ Buy Failed {symbol}: {e}")
@@ -387,21 +415,14 @@ class TradingBot:
     def manage_trade(self, symbol):
         trade = self.active_trades[symbol]
         curr = trade.get('current_price', 0.0)
-        highest = trade.get('highest_price', trade['entry_price'])
-        entry = trade['entry_price']
 
-        # Trailing Stop Logic
-        trailing_stop_price = highest * (1 - self.TRAILING_DEV_PCT)
-        hard_stop_price = entry * (1 - self.INITIAL_SL_PCT)
-
-        # Exit Condition 1: Trailing Stop Hit
-        if curr <= trailing_stop_price:
-            self.execute_sell(symbol, curr, f"Trailing Stop (High: {highest:.4f})")
+        # Set & Forget Exit Logic
+        if curr >= trade['tp_price']:
+            self.execute_sell(symbol, curr, "Take Profit")
             return
 
-        # Exit Condition 2: Hard Stop Hit (Safety)
-        if curr <= hard_stop_price:
-             self.execute_sell(symbol, curr, "Safety Hard Stop")
+        if curr <= trade['sl_price']:
+             self.execute_sell(symbol, curr, "Stop Loss")
              return
 
     def archive_and_delete(self, symbol, price, reason, pnl_abs, pnl_pct):
