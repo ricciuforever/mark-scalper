@@ -1,0 +1,7 @@
+# Assicurati che mod_rewrite e mod_proxy siano abilitati su Apache
+DirectoryIndex disabled
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(.*)$ http://127.0.0.1:5000/$1 [P,L]
+</IfModule>

@@ -55,6 +55,45 @@ To keep the bot running in the background and restart on failure, use the provid
 - **Debug Mode**: set `APP_DEBUG=false` in `.env` for production.
 - **Whitelist**: Editable directly from the Dashboard.
 
+## Deployment / Messa in Produzione (Fix Error 403)
+
+Se riscontri un errore **403 Forbidden** accedendo al dominio (es. `https://mark.capitaltrading.it/`), significa che il web server (Nginx o Apache) non sta inoltrando le richieste al bot (che gira sulla porta 5000).
+
+### Opzione 1: Nginx (Consigliata)
+Aggiungi un blocco `proxy_pass` alla configurazione del tuo server block:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:5000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+Vedi esempio completo in `deployment/nginx_proxy.conf`.
+
+### Opzione 2: Apache
+Se usi Apache, assicurati che `mod_proxy` e `mod_rewrite` siano abilitati e usa un file `.htaccess` nella root:
+
+```apache
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(.*)$ http://127.0.0.1:5000/$1 [P,L]
+</IfModule>
+```
+Vedi esempio completo in `deployment/apache_proxy.htaccess`.
+
+### Opzione 3: Plesk (Se applicabile)
+Se usi Plesk:
+1. Vai su **Impostazioni Apache e Nginx**.
+2. Deseleziona "Modalità proxy" (se vuoi usare solo Nginx) oppure aggiungi le direttive Nginx aggiuntive:
+   ```nginx
+   location / {
+       proxy_pass http://127.0.0.1:5000;
+       proxy_set_header Host $host;
+       proxy_set_header X-Real-IP $remote_addr;
+   }
+   ```
+
 ## Requirements
 - Python 3.8+ installed.
 - Pip installed.
