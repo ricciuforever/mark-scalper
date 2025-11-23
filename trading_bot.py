@@ -49,7 +49,7 @@ class TradingBot:
         ]
         self.quote_currency = 'EUR'
         self.timeframe = '1m'
-        self.trade_size = 10.0
+        self.trade_size = 100.0
 
         # --- Configurazione Dust ---
         self.DUST_THRESHOLD_EUR = 0.5
