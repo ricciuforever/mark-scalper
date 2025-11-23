@@ -63,10 +63,18 @@ class TradingBot:
 
         self.active_trades = self.load_active_trades()
 
-        # Backward compatibility for restored trades
+        # Backward compatibility for restored trades (Migration to Fixed SL/TP)
         for sym, trade in self.active_trades.items():
-            if 'highest_price' not in trade:
-                trade['highest_price'] = trade.get('entry_price', 0.0)
+            if 'tp_price' not in trade:
+                 # Fallback safe defaults to avoid crash (1% TP, 1% SL)
+                 # These will likely be closed quickly or manually, but prevents loop error
+                 entry = trade.get('entry_price', 0.0)
+                 trade['tp_price'] = entry * 1.01
+                 trade['sl_price'] = entry * 0.99
+
+            # Remove obsolete keys if present
+            if 'highest_price' in trade:
+                del trade['highest_price']
 
         self.recently_closed = []
 
@@ -169,22 +177,39 @@ class TradingBot:
                     if symbol not in self.active_trades:
                         self.log(f"♻️ Trovata posizione orfana: {symbol} ({qty} {coin} - {value_eur:.2f}€). Recupero...")
 
+                        # Recupero ATR per SL/TP Iniziali (New Strategy)
+                        atr = 0.0
+                        try:
+                             df = self.fetch_ohlcv(symbol, '1m', limit=100)
+                             if df is not None:
+                                 df = self.calculate_indicators(df, '1m')
+                                 atr = df.iloc[-1]['atr']
+                        except: pass
+
+                        if atr == 0:
+                             atr = current_price * 0.005 # Fallback 0.5% volatility est.
+
+                        sl_price = current_price - (atr * 1.5)
+                        tp_price = current_price + (atr * 2.5)
                         is_dust = value_eur < self.DUST_THRESHOLD_EUR
 
                         self.active_trades[symbol] = {
                             'entry_price': current_price, # Approssimazione
-                            'highest_price': current_price, # Init per Trailing
                             'entry_time': datetime.now(),
                             'quantity': qty,
+                            'sl_price': sl_price,
+                            'tp_price': tp_price,
                             'recovered': True,
                             'is_dust': is_dust
                         }
                     else:
                         # Aggiorniamo la quantità reale se differisce (es. parziali fill)
                         self.active_trades[symbol]['quantity'] = qty
-                        # Init highest_price if missing
-                        if 'highest_price' not in self.active_trades[symbol]:
-                            self.active_trades[symbol]['highest_price'] = self.active_trades[symbol].get('entry_price', current_price)
+
+                        # Ensure SL/TP exist (Migration Check)
+                        if 'tp_price' not in self.active_trades[symbol]:
+                             self.active_trades[symbol]['tp_price'] = self.active_trades[symbol]['entry_price'] * 1.01
+                             self.active_trades[symbol]['sl_price'] = self.active_trades[symbol]['entry_price'] * 0.99
 
             # Pulizia inversa: Se abbiamo un trade in memoria ma saldo 0, lo rimuoviamo
             to_remove = []
