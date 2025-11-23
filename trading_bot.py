@@ -523,14 +523,76 @@ class TradingBot:
     def get_historical_pnl(self):
         df = pd.DataFrame(self.historical_trades_cache)
         if df.empty:
-            return {'dates': [], 'bot_pnl': [], 'total_realized_pnl': 0.0}
+            return {'dates': [], 'bot_pnl': [], 'btc_pnl': [], 'total_realized_pnl': 0.0}
 
         df['close_time'] = pd.to_datetime(df['close_time'])
         df['date_str'] = df['close_time'].dt.strftime('%Y-%m-%d')
         daily_pnl = df.groupby('date_str')['pnl_abs'].sum().cumsum()
 
+        dates = daily_pnl.index.tolist()
+        bot_pnl = daily_pnl.values.tolist()
+        total_realized = df['pnl_abs'].sum()
+
+        # Calcolo Capitale Iniziale Stimato
+        try:
+            wallet_balance = self.get_eur_balance()
+            active_value = sum(t.get('current_price', 0) * t.get('quantity', 0) for t in self.active_trades.values())
+            current_equity = wallet_balance + active_value
+            initial_capital = current_equity - total_realized
+            if initial_capital <= 0: initial_capital = 1000.0 # Fallback
+        except:
+            initial_capital = 1000.0
+
+        # Calcolo Benchmark BTC Buy & Hold
+        btc_pnl = []
+        if dates and self.client:
+            try:
+                start_date = datetime.strptime(dates[0], "%Y-%m-%d")
+                fetch_start = start_date - timedelta(days=1)
+                start_ts = int(fetch_start.timestamp() * 1000)
+
+                # Fetch daily klines BTCEUR
+                klines = self.client.klines("BTCEUR", "1d", startTime=start_ts, limit=1000)
+
+                btc_prices = {}
+                base_price = None
+
+                for k in klines:
+                    d_obj = datetime.fromtimestamp(k[0]/1000)
+                    d_str = d_obj.strftime('%Y-%m-%d')
+                    close_price = float(k[4])
+                    btc_prices[d_str] = close_price
+
+                    # Cerchiamo il prezzo di apertura del primo giorno utile
+                    if d_str == dates[0]:
+                        base_price = float(k[1]) # Open price
+
+                # Fallback se non troviamo il giorno esatto
+                if base_price is None and klines:
+                    base_price = float(klines[0][1])
+
+                if base_price:
+                    for d in dates:
+                        price = btc_prices.get(d)
+                        if price:
+                            # PnL = (Initial / Base * Current) - Initial
+                            val = (initial_capital / base_price) * price
+                            pnl = val - initial_capital
+                            btc_pnl.append(pnl)
+                        else:
+                            btc_pnl.append(btc_pnl[-1] if btc_pnl else 0.0)
+                else:
+                     btc_pnl = [0.0] * len(dates)
+
+            except Exception as e:
+                print(f"Error calculating BTC benchmark: {e}")
+                btc_pnl = [0.0] * len(dates)
+        else:
+             btc_pnl = [0.0] * len(dates)
+
         return {
-            'dates': daily_pnl.index.tolist(),
-            'bot_pnl': daily_pnl.values.tolist(),
-            'total_realized_pnl': df['pnl_abs'].sum()
+            'dates': dates,
+            'bot_pnl': bot_pnl,
+            'btc_pnl': btc_pnl,
+            'total_realized_pnl': total_realized
         }
