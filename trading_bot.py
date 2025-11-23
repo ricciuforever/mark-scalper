@@ -46,17 +46,16 @@ class TradingBot:
             'AVAX', 'BCH', 'DOT', 'SHIB', 'TRX', 'ARB', 'APT', 'GALA', 'ATOM', 'EGLD', 'POL'
         ]
         self.quote_currency = 'EUR'
-        self.timeframe = '1m'
+        self.timeframe = '15m'
         self.trade_size = 100.0
 
         # --- Configurazione Dust ---
         self.DUST_THRESHOLD_EUR = 0.5
 
         # --- Strategy Configuration ---
-        self.ATR_SL_MULTIPLIER = 2.0
-        self.ATR_TP_MULTIPLIER = 3.0
         self.ATR_PERIOD = 14
-        self.FIXED_TP_PERCENTAGE = 0.005  # Default TP 0.5%
+        self.TRAILING_DEV_PCT = 0.02
+        self.INITIAL_SL_PCT = 0.03
 
         self.is_running = False
         self.logs = []
@@ -65,10 +64,10 @@ class TradingBot:
 
         self.active_trades = self.load_active_trades()
 
-        # Aggiorna TP per i trade esistenti caricati
+        # Backward compatibility for restored trades
         for sym, trade in self.active_trades.items():
-            if trade.get('entry_price', 0) > 0:
-                trade['tp_price'] = trade['entry_price'] * (1 + self.FIXED_TP_PERCENTAGE)
+            if 'highest_price' not in trade:
+                trade['highest_price'] = trade.get('entry_price', 0.0)
 
         self.recently_closed = []
 
@@ -229,7 +228,7 @@ class TradingBot:
             if len(self.logs) > 200: self.logs.pop()
         print(entry)
 
-    def fetch_ohlcv(self, symbol, limit=50):
+    def fetch_ohlcv(self, symbol, limit=300):
         if not self.client: return None
         try:
             klines = self.client.klines(symbol, self.timeframe, limit=limit)
@@ -249,9 +248,9 @@ class TradingBot:
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean().replace(0, 0.000001)
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
-        df['sma'] = df['close'].rolling(20).mean()
-        df['std'] = df['close'].rolling(20).std()
-        df['lower_band'] = df['sma'] - (2 * df['std'])
+
+        # EMA Indicators for Trend
+        df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
 
         high_low = df['high'] - df['low']
         high_close = np.abs(df['high'] - df['close'].shift())
@@ -292,6 +291,11 @@ class TradingBot:
         if curr == 0.0: return
 
         trade['current_price'] = curr
+
+        # Trailing Logic Update
+        if curr > trade.get('highest_price', 0.0):
+            trade['highest_price'] = curr
+
         trade['pnl_pct'] = (curr - trade['entry_price']) / trade['entry_price']
         trade['pnl_abs'] = (curr - trade['entry_price']) * trade['quantity']
 
@@ -344,16 +348,23 @@ class TradingBot:
             return
 
         df = self.fetch_ohlcv(symbol)
-        if df is None or len(df) < self.ATR_PERIOD: return
+        if df is None or len(df) < 200: return
 
         last = df.iloc[-1]
-        if pd.isna(last['atr']): return
 
-        # Condizione di acquisto
-        if last['rsi'] < 30 and last['close'] < last['lower_band']:
-            self.execute_buy(symbol, last['close'], last['atr'])
+        # Trend Following Strategy:
+        # 1. Trend must be UP (Price > EMA 200)
+        # 2. Pullback must be significant (RSI < 40)
 
-    def execute_buy(self, symbol, price, atr_value):
+        if pd.isna(last['ema_200']) or pd.isna(last['rsi']): return
+
+        is_uptrend = last['close'] > last['ema_200']
+        is_pullback = last['rsi'] < 40
+
+        if is_uptrend and is_pullback:
+            self.execute_buy(symbol, last['close'])
+
+    def execute_buy(self, symbol, price):
         if not self.client: return
 
         try:
@@ -364,18 +375,14 @@ class TradingBot:
             quote_spent = float(order['cummulativeQuoteQty'])
             avg_price = quote_spent / executed_qty if executed_qty > 0 else price
 
-            atr_sl_distance = atr_value * self.ATR_SL_MULTIPLIER
-            # atr_tp_distance = atr_value * self.ATR_TP_MULTIPLIER # Unused
-
             position_value_eur = avg_price * executed_qty
             is_dust = position_value_eur < self.DUST_THRESHOLD_EUR
 
             self.active_trades[symbol] = {
                 'entry_price': avg_price,
+                'highest_price': avg_price, # Init for Trailing
                 'entry_time': datetime.now(),
                 'quantity': executed_qty,
-                'sl_price': avg_price - atr_sl_distance,
-                'tp_price': avg_price * (1 + self.FIXED_TP_PERCENTAGE),
                 'is_dust': is_dust,
                 'error_state': False
             }
@@ -390,14 +397,22 @@ class TradingBot:
     def manage_trade(self, symbol):
         trade = self.active_trades[symbol]
         curr = trade.get('current_price', 0.0)
+        highest = trade.get('highest_price', trade['entry_price'])
+        entry = trade['entry_price']
 
-        if curr >= trade['tp_price']:
-            self.execute_sell(symbol, curr, "ATR Fixed TP")
+        # Trailing Stop Logic
+        trailing_stop_price = highest * (1 - self.TRAILING_DEV_PCT)
+        hard_stop_price = entry * (1 - self.INITIAL_SL_PCT)
+
+        # Exit Condition 1: Trailing Stop Hit
+        if curr <= trailing_stop_price:
+            self.execute_sell(symbol, curr, f"Trailing Stop (High: {highest:.4f})")
             return
 
-        elif curr <= trade['sl_price']:
-            self.execute_sell(symbol, curr, "ATR Fixed SL")
-            return
+        # Exit Condition 2: Hard Stop Hit (Safety)
+        if curr <= hard_stop_price:
+             self.execute_sell(symbol, curr, "Safety Hard Stop")
+             return
 
     def archive_and_delete(self, symbol, price, reason, pnl_abs, pnl_pct):
         # Archivia nello storico
