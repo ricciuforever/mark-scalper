@@ -1,0 +1,5 @@
+flask
+binance-connector
+pandas
+numpy
+python-dotenv

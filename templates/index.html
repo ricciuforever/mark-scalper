@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Binance Scalper Bot</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', monospace; background-color: #121212; color: #e0e0e0; }
+        .card { background-color: #1e1e1e; border: 1px solid #333; margin-bottom: 20px; }
+        .log-console { height: 200px; overflow-y: auto; background-color: #000; font-size: 0.85rem; padding: 10px; border: 1px solid #444; color: #0f0; }
+        .status-indicator { width: 12px; height: 12px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .status-running { background-color: #0f0; box-shadow: 0 0 8px #0f0; }
+        .status-stopped { background-color: #f00; box-shadow: 0 0 8px #f00; }
+        .table-sm td, .table-sm th { padding: 0.5rem; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+
+<div class="container-fluid p-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h3>🚀 Binance Scalper <small class="text-danger fs-6 fw-bold">REAL TRADING</small></h3>
+        <div>
+            <span id="connectionStatus" class="badge bg-secondary">Connecting...</span>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-3">
+            <div class="card mb-3">
+                <div class="card-body text-center">
+                    <h6 class="text-muted">Wallet Balance (EUR)</h6>
+                    <h2 id="totalBalanceVal" class="fw-bold">--- €</h2>
+                    <small class="text-muted">Available: <span id="availableBalanceVal">--- €</span></small>
+                    <br><small class="text-muted">Total PnL: <span id="pnlVal">---</span></small>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header fw-bold">Control Panel</div>
+                <div class="card-body">
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                        <div>
+                            <div id="statusDot" class="status-indicator status-stopped"></div>
+                            <span id="currentAction" class="text-muted">Idle</span>
+                        </div>
+                    </div>
+
+                    <div class="d-grid gap-2 mb-3">
+                        <button id="btnStart" class="btn btn-success" onclick="startBot()">START TRADING</button>
+                        <button id="btnStop" class="btn btn-danger" onclick="stopBot()">STOP</button>
+                    </div>
+                    <hr>
+                    <div class="mb-3">
+                        <label class="form-label">Trade Size (€)</label>
+                        <input type="number" id="tradeSizeInput" class="form-control" value="10" onchange="updateConfig()">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Whitelist</label>
+                        <textarea id="whitelistInput" class="form-control form-control-sm" rows="6" onchange="updateConfig()">BTC, ETH, SOL, XRP, BNB, ADA, DOGE, LINK, LTC, SUI, AVAX, BCH, LTC, DOT, LINK, SHIB, PEPE, TRX, GRT, GMT, S, TRUMP, ARB, APT, GALA, WIF, OP, PNUT, ATOM, EGLD, WIN, WLFI, WLD, POL, VET, RENDER, XLM, ICP, NEAR</textarea>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-body p-2">
+                    <canvas id="pnlChart" height="150"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-9">
+
+            <div class="card">
+                <div class="card-header fw-bold d-flex justify-content-between">
+                    <span>⚡ Active Trades</span>
+                    <span id="activeCount" class="badge bg-primary">0</span>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table table-dark table-striped table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Value (€)</th> <th>Entry</th>
+                                <th>Current</th>
+                                <th>SL Price</th> <th>TP Price</th> <th>PnL %</th>
+                                <th>PnL €</th>
+                                <th>Time Open</th>
+                            </tr>
+                        </thead>
+                        <tbody id="activeTradesBody">
+                            <tr><td colspan="9" class="text-center text-muted">No active trades</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header fw-bold">📜 Recently Closed Trades</div>
+                <div class="card-body p-0" style="max-height: 300px; overflow-y: auto;">
+                    <table class="table table-dark table-hover table-sm mb-0">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Type</th>
+                                <th>Close Price</th>
+                                <th>PnL €</th>
+                                <th>Reason</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="closedTradesBody">
+                            <tr><td colspan="6" class="text-center text-muted">No history yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header fw-bold">System Logs</div>
+                <div class="card-body p-0">
+                    <div id="logConsole" class="log-console"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let chartInstance = null;
+
+    function initChart() {
+        const ctx = document.getElementById('pnlChart').getContext('2d');
+        chartInstance = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [{ label: 'Total PnL (€)', data: [], borderColor: '#0f0', tension: 0.1 }] },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: { x: { display: false }, y: { ticks: { color: '#666', font: {size: 10} }, grid: { color: '#333' } } }
+            }
+        });
+    }
+
+    function fetchStatus() {
+        fetch('api/status')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('connectionStatus').className = 'badge bg-success';
+                document.getElementById('connectionStatus').innerText = 'Connected';
+
+                const dot = document.getElementById('statusDot');
+                const actionText = document.getElementById('currentAction');
+                if (data.is_running) {
+                    dot.className = 'status-indicator status-running';
+                    actionText.innerText = data.current_status;
+                    actionText.className = 'text-success fw-bold';
+                } else {
+                    dot.className = 'status-indicator status-stopped';
+                    actionText.innerText = 'Stopped';
+                    actionText.className = 'text-danger';
+                }
+
+                // AGGIORNAMENTO SALDI: Uso i nuovi campi total_balance e available_balance
+                if(data.total_balance !== undefined) {
+                    document.getElementById('totalBalanceVal').innerText = data.total_balance.toFixed(2) + ' €';
+                    document.getElementById('availableBalanceVal').innerText = data.available_balance.toFixed(2) + ' €';
+                }
+
+                document.getElementById('logConsole').innerHTML = data.logs.join('<br>');
+
+                // Active Trades
+                const activeBody = document.getElementById('activeTradesBody');
+                activeBody.innerHTML = '';
+                const trades = data.active_trades;
+                const symbols = Object.keys(trades);
+                document.getElementById('activeCount').innerText = symbols.length;
+
+                if (symbols.length === 0) {
+                    activeBody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No active trades</td></tr>';
+                } else {
+                    symbols.forEach(sym => {
+                        const t = trades[sym];
+
+                        const pnlColor = t.pnl_abs >= 0 ? 'text-success' : 'text-danger';
+                        const slPrice = t.sl_price ? t.sl_price.toFixed(4) : 'N/A';
+                        const tpPrice = t.tp_price ? t.tp_price.toFixed(4) : 'N/A';
+                        // Current Price è inizializzato a 0.0 nel backend se manca,
+                        // ma per display usiamo '...' se è ancora 0 per indicare caricamento.
+                        const currentPriceDisplay = t.current_price > 0 ? t.current_price.toFixed(4) : '...';
+
+                        // NUOVO: Visualizzazione Dust
+                        let symbolDisplay = `<span class="fw-bold text-warning">${sym}</span>`;
+                        if (t.is_dust) {
+                            symbolDisplay = `<span class="fw-bold text-secondary">${sym}</span> <span class="badge bg-warning text-dark">DUST</span>`;
+                        }
+
+                        // CALCOLO VALORE IN EUR: quantity * entry_price
+                        const investedValue = (t.quantity * t.entry_price).toFixed(2);
+
+                        const row = `<tr>
+                            <td>${symbolDisplay}</td>
+                            <td>${investedValue}€</td> <td>${t.entry_price.toFixed(4)}</td>
+                            <td>${currentPriceDisplay}</td>
+                            <td class="text-danger">${slPrice}</td> <td class="text-success">${tpPrice}</td> <td class="${pnlColor}">${(t.pnl_pct * 100).toFixed(2)}%</td>
+                            <td class="${pnlColor} fw-bold">${t.pnl_abs.toFixed(2)}€</td>
+                            <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
+                        </tr>`;
+                        activeBody.innerHTML += row;
+                    });
+                }
+
+                // Closed Trades
+                const closedBody = document.getElementById('closedTradesBody');
+                closedBody.innerHTML = '';
+                const closed = data.closed_trades;
+
+                if (!closed || closed.length === 0) {
+                    closedBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No history yet</td></tr>';
+                } else {
+                    closed.forEach(t => {
+                        const pnlColor = t.pnl_abs >= 0 ? 'text-success' : 'text-danger';
+                        const row = `<tr>
+                            <td>${t.symbol}</td>
+                            <td><span class="badge bg-secondary">LONG</span></td>
+                            <td>${t.exit_price.toFixed(4)}</td>
+                            <td class="${pnlColor} fw-bold">${t.pnl_abs.toFixed(4)}€</td>
+                            <td><small>${t.reason}</small></td>
+                            <td>${t.close_time}</td>
+                        </tr>`;
+                        closedBody.innerHTML += row;
+                    });
+                }
+            })
+            .catch(err => {
+                document.getElementById('connectionStatus').className = 'badge bg-danger';
+                document.getElementById('connectionStatus').innerText = 'Disconnected';
+            });
+    }
+
+    function fetchStats() {
+        fetch('api/stats')
+            .then(response => response.json())
+            .then(data => {
+                const pnl = data.total_pnl;
+                const pnlEl = document.getElementById('pnlVal');
+                pnlEl.innerText = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' €';
+                pnlEl.className = pnl >= 0 ? 'text-success fw-bold' : 'text-danger fw-bold';
+
+                if (chartInstance && data.chart_data.dates.length > 0) {
+                    chartInstance.data.labels = data.chart_data.dates;
+                    chartInstance.data.datasets[0].data = data.chart_data.bot_pnl;
+                    chartInstance.update();
+                }
+            });
+    }
+
+    function startBot() { fetch('api/start', { method: 'POST' }); }
+    function stopBot() { fetch('api/stop', { method: 'POST' }); }
+
+    function updateConfig() {
+        const whitelist = document.getElementById('whitelistInput').value;
+        const size = document.getElementById('tradeSizeInput').value;
+        fetch('api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ whitelist: whitelist, trade_size: size })
+        });
+    }
+
+    initChart();
+    setInterval(fetchStatus, 1000);
+    setInterval(fetchStats, 10000);
+    fetchStatus();
+    fetchStats();
+</script>
+
+</body>
+</html>
