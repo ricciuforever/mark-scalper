@@ -125,15 +125,27 @@
             data: {
                 labels: [],
                 datasets: [
-                    { label: 'Bot PnL (€)', data: [], borderColor: '#0f0', tension: 0.1 },
-                    { label: 'BTC Hold (€)', data: [], borderColor: '#f7931a', tension: 0.1, borderDash: [5, 5] }
+                    { label: 'Bot PnL (%)', data: [], borderColor: '#0f0', tension: 0.1 },
+                    { label: 'BTC Hold (%)', data: [], borderColor: '#f7931a', tension: 0.1, borderDash: [5, 5] }
                 ]
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: { legend: { display: true, labels: { color: '#ccc' } } },
-                scales: { x: { display: false }, y: { ticks: { color: '#666', font: {size: 10} }, grid: { color: '#333' } } }
+                scales: {
+                    x: { display: false },
+                    y: {
+                        ticks: {
+                            color: '#666',
+                            font: {size: 10},
+                            callback: function(value) { return value + '%'; }
+                        },
+                        grid: { color: '#333' },
+                        suggestedMax: 5,
+                        suggestedMin: -5
+                    }
+                }
             }
         });
     }
@@ -245,9 +257,10 @@
 
                 if (chartInstance && data.chart_data.dates.length > 0) {
                     chartInstance.data.labels = data.chart_data.dates;
-                    chartInstance.data.datasets[0].data = data.chart_data.bot_pnl;
-                    if (data.chart_data.btc_pnl) {
-                        chartInstance.data.datasets[1].data = data.chart_data.btc_pnl;
+                    // Use new percentage fields
+                    chartInstance.data.datasets[0].data = data.chart_data.bot_pnl_pct;
+                    if (data.chart_data.btc_pnl_pct) {
+                        chartInstance.data.datasets[1].data = data.chart_data.btc_pnl_pct;
                     }
                     chartInstance.update();
                 }

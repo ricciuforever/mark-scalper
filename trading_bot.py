@@ -75,6 +75,7 @@ class TradingBot:
         self.recently_closed = []
 
         self.historical_trades_cache = self.load_historical_trades()
+        self.benchmark_cache = {'data': [], 'timestamp': 0}
 
         if self.historical_trades_cache:
             self.recently_closed = sorted(self.historical_trades_cache, key=lambda x: x.get('close_time', ''), reverse=True)[:10]
@@ -543,56 +544,72 @@ class TradingBot:
         except:
             initial_capital = 1000.0
 
-        # Calcolo Benchmark BTC Buy & Hold
-        btc_pnl = []
+        # Calcolo Benchmark BTC Buy & Hold (Cached 1h)
+        btc_pnl_pct = []
+        cache_valid = (time.time() - self.benchmark_cache['timestamp']) < 3600
+
         if dates and self.client:
-            try:
-                start_date = datetime.strptime(dates[0], "%Y-%m-%d")
-                fetch_start = start_date - timedelta(days=1)
-                start_ts = int(fetch_start.timestamp() * 1000)
+            if cache_valid and self.benchmark_cache['data'] and len(self.benchmark_cache['data']) == len(dates):
+                btc_pnl_pct = self.benchmark_cache['data']
+            else:
+                try:
+                    start_date = datetime.strptime(dates[0], "%Y-%m-%d")
+                    fetch_start = start_date - timedelta(days=1)
+                    start_ts = int(fetch_start.timestamp() * 1000)
 
-                # Fetch daily klines BTCEUR
-                klines = self.client.klines("BTCEUR", "1d", startTime=start_ts, limit=1000)
+                    # Fetch daily klines BTCEUR
+                    klines = self.client.klines("BTCEUR", "1d", startTime=start_ts, limit=1000)
 
-                btc_prices = {}
-                base_price = None
+                    btc_prices = {}
+                    base_price = None
 
-                for k in klines:
-                    d_obj = datetime.fromtimestamp(k[0]/1000)
-                    d_str = d_obj.strftime('%Y-%m-%d')
-                    close_price = float(k[4])
-                    btc_prices[d_str] = close_price
+                    for k in klines:
+                        d_obj = datetime.fromtimestamp(k[0]/1000)
+                        d_str = d_obj.strftime('%Y-%m-%d')
+                        close_price = float(k[4])
+                        btc_prices[d_str] = close_price
 
-                    # Cerchiamo il prezzo di apertura del primo giorno utile
-                    if d_str == dates[0]:
-                        base_price = float(k[1]) # Open price
+                        # Cerchiamo il prezzo di apertura del primo giorno utile
+                        if d_str == dates[0]:
+                            base_price = float(k[1]) # Open price
 
-                # Fallback se non troviamo il giorno esatto
-                if base_price is None and klines:
-                    base_price = float(klines[0][1])
+                    # Fallback se non troviamo il giorno esatto
+                    if base_price is None and klines:
+                        base_price = float(klines[0][1])
 
-                if base_price:
-                    for d in dates:
-                        price = btc_prices.get(d)
-                        if price:
-                            # PnL = (Initial / Base * Current) - Initial
-                            val = (initial_capital / base_price) * price
-                            pnl = val - initial_capital
-                            btc_pnl.append(pnl)
-                        else:
-                            btc_pnl.append(btc_pnl[-1] if btc_pnl else 0.0)
-                else:
-                     btc_pnl = [0.0] * len(dates)
+                    if base_price:
+                        for d in dates:
+                            price = btc_prices.get(d)
+                            if price:
+                                # PnL % = (Current - Base) / Base * 100
+                                pct = ((price - base_price) / base_price) * 100
+                                btc_pnl_pct.append(pct)
+                            else:
+                                btc_pnl_pct.append(btc_pnl_pct[-1] if btc_pnl_pct else 0.0)
 
-            except Exception as e:
-                print(f"Error calculating BTC benchmark: {e}")
-                btc_pnl = [0.0] * len(dates)
+                        # Update cache
+                        self.benchmark_cache['data'] = btc_pnl_pct
+                        self.benchmark_cache['timestamp'] = time.time()
+                    else:
+                         btc_pnl_pct = [0.0] * len(dates)
+
+                except Exception as e:
+                    self.log(f"⚠️ BTC Benchmark Error: {e}")
+                    btc_pnl_pct = [0.0] * len(dates)
         else:
-             btc_pnl = [0.0] * len(dates)
+             btc_pnl_pct = [0.0] * len(dates)
+
+        # Calcolo Bot PnL %
+        bot_pnl_pct = []
+        if initial_capital > 0:
+            bot_pnl_pct = [(x / initial_capital) * 100 for x in bot_pnl]
+        else:
+            bot_pnl_pct = [0.0] * len(bot_pnl)
 
         return {
             'dates': dates,
-            'bot_pnl': bot_pnl,
-            'btc_pnl': btc_pnl,
+            'bot_pnl': bot_pnl,           # Keep for legacy/debug if needed
+            'bot_pnl_pct': bot_pnl_pct,   # NEW
+            'btc_pnl_pct': btc_pnl_pct,   # NEW
             'total_realized_pnl': total_realized
         }
