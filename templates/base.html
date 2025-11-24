@@ -75,10 +75,11 @@
                                 <th>SL Price</th> <th>TP Price</th> <th>PnL %</th>
                                 <th>PnL €</th>
                                 <th>Time Open</th>
+                                <th>Action</th>
                             </tr>
                         </thead>
                         <tbody id="activeTradesBody">
-                            <tr><td colspan="9" class="text-center text-muted">No active trades</td></tr>
+                            <tr><td colspan="10" class="text-center text-muted">No active trades</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -185,8 +186,10 @@
                 document.getElementById('activeCount').innerText = symbols.length;
 
                 if (symbols.length === 0) {
-                    activeBody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No active trades</td></tr>';
+                    activeBody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No active trades</td></tr>';
                 } else {
+                    const isAdmin = window.location.pathname.includes('/admin');
+
                     symbols.forEach(sym => {
                         const t = trades[sym];
 
@@ -209,6 +212,11 @@
                         // CALCOLO VALORE IN EUR: quantity * entry_price
                         const investedValue = (t.quantity * t.entry_price).toFixed(2);
 
+                        let actionBtn = '';
+                        if (isAdmin) {
+                            actionBtn = `<button class="btn btn-danger btn-sm py-0" onclick="closeTrade('${sym}')">X</button>`;
+                        }
+
                         const row = `<tr>
                             <td>${symbolDisplay}</td>
                             <td>${investedValue}€</td> <td>${t.entry_price.toFixed(4)}</td>
@@ -218,6 +226,7 @@
                             <td class="${pnlColor}">${(t.pnl_pct * 100).toFixed(2)}%</td>
                             <td class="${pnlColor} fw-bold">${t.pnl_abs.toFixed(2)}€</td>
                             <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
+                            <td>${actionBtn}</td>
                         </tr>`;
                         activeBody.innerHTML += row;
                     });
