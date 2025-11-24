@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import math
+from decimal import Decimal
 from binance.spot import Spot
 from binance.error import ClientError
 
@@ -149,12 +150,16 @@ class TradingBot:
         return 0.00000001 # Fallback safe
 
     def round_to_step_size(self, quantity, step_size):
-        """Arrotonda la quantità in base allo stepSize richiesto da Binance."""
+        """Arrotonda la quantità in base allo stepSize richiesto da Binance (Versione Decimal sicura)."""
         if step_size == 0: return quantity
-        precision = int(round(-math.log(step_size, 10), 0))
-        # Tronca al ribasso alla precisione corretta
-        factor = 10 ** precision
-        return math.floor(quantity * factor) / factor
+        try:
+            q = Decimal(str(quantity))
+            s = Decimal(str(step_size))
+            target = (q // s) * s
+            return float(target)
+        except:
+            # Fallback legacy (unsafe ma meglio di crash)
+            return quantity
 
     # --- LOGICHE DI SINCRONIZZAZIONE ---
     def sync_orphan_positions(self):
@@ -597,7 +602,8 @@ class TradingBot:
 
              # Flag visuale per UI se in errore
              if trade.get('error_state'):
-                 trade_copy['reason_display'] = "⚠️ SELL ERROR - RETRYING"
+                 last_err = trade.get('last_error', 'Unknown Error')
+                 trade_copy['reason_display'] = f"⚠️ {last_err}"
 
              # Map Internal Safety SL to UI 'sl_price'
              trade_copy['sl_price'] = trade.get('safety_sl_price', 0.0)
