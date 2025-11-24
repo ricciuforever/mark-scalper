@@ -18,6 +18,7 @@
                     <div class="d-grid gap-2 mb-3">
                         <button id="btnStart" class="btn btn-success" onclick="startBot()">START TRADING</button>
                         <button id="btnStop" class="btn btn-danger" onclick="stopBot()">STOP</button>
+                        <button id="btnSweep" class="btn btn-warning text-dark" onclick="sweepDust()">🧹 SWEEP DUST TO BNB</button>
                     </div>
                     <hr>
                     <div class="mb-3">
@@ -35,6 +36,34 @@
 {% block extra_scripts %}
     function startBot() { fetch('api/start', { method: 'POST' }); }
     function stopBot() { fetch('api/stop', { method: 'POST' }); }
+
+    function sweepDust() {
+        if (!confirm('Convert all DUST positions to BNB? This cannot be undone.')) return;
+        fetch('api/sweep_dust', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if(data.status === 'success') {
+                    alert(data.message);
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(err => alert('Network error'));
+    }
+
+    function closeTrade(symbol) {
+        if (!confirm(`Are you sure you want to FORCE CLOSE ${symbol}?`)) return;
+        fetch(`api/close/${symbol}`, { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if(data.status === 'success') {
+                    // alert(data.message); // Optional feedback
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(err => alert('Network error'));
+    }
 
     function updateConfig() {
         const whitelist = document.getElementById('whitelistInput').value;

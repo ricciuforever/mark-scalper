@@ -505,6 +505,73 @@ class TradingBot:
         # RIMUOVIAMO DAGLI ATTIVI
         del self.active_trades[symbol]
 
+    def force_close_trade(self, symbol):
+        """Forza la chiusura di un trade (Manuale)."""
+        if symbol not in self.active_trades: return False, "Trade not found"
+
+        trade = self.active_trades[symbol]
+        curr_price = self.get_current_price(symbol)
+
+        # Se è DUST o valore molto basso, rimuoviamo e basta
+        qty = trade['quantity']
+        val = qty * curr_price
+
+        if trade.get('is_dust') or val < self.MIN_NOTIONAL:
+             self.log(f"🗑️ Force Close (Dust): {symbol}")
+             self.archive_and_delete(symbol, curr_price, "Manual Close (Dust)", 0, 0)
+             return True, "Dust removed"
+
+        # Altrimenti proviamo a vendere a mercato
+        self.execute_sell(symbol, curr_price, "Manual Close")
+
+        # Check se è stato chiuso
+        if symbol not in self.active_trades:
+            return True, "Sold successfully"
+        else:
+            return False, f"Sell failed: {trade.get('last_error', 'Unknown')}"
+
+    def convert_dust_to_bnb(self):
+        """Converte tutte le posizioni 'dust' in BNB."""
+        if not self.client: return False, "Client not initialized"
+
+        # 1. Identifica asset dust
+        dust_assets = []
+        dust_symbols = []
+
+        for sym, trade in self.active_trades.items():
+            if trade.get('is_dust', False):
+                base_asset = sym.replace(self.quote_currency, '')
+                dust_assets.append(base_asset)
+                dust_symbols.append(sym)
+
+        if not dust_assets:
+            return False, "No dust positions found"
+
+        try:
+            self.log(f"🧹 Converting to BNB: {', '.join(dust_assets)}...")
+            # API expects list of strings. Method is transfer_dust in binance-connector v3+
+            res = self.client.transfer_dust(asset=dust_assets)
+
+            # Response example: {'totalServiceCharge': '0.000...', 'totalTransfered': '...', 'transferResult': [{'amount': '...', 'fromAsset': 'BTC', 'operateTime': ...}]}
+
+            transferred = [x['fromAsset'] for x in res.get('transferResult', [])]
+
+            # Clean up active trades
+            count = 0
+            for asset in transferred:
+                symbol = f"{asset}{self.quote_currency}"
+                if symbol in self.active_trades:
+                    # Archive as Dust Sweep
+                    self.archive_and_delete(symbol, 0, "Converted to BNB", 0, 0)
+                    count += 1
+
+            return True, f"Converted {count} assets to BNB"
+
+        except ClientError as e:
+            return False, f"Binance Error: {e.error_message}"
+        except Exception as e:
+            return False, f"Error: {str(e)}"
+
     def execute_sell(self, symbol, price, reason):
         if not self.client: return
         trade = self.active_trades[symbol]

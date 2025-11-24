@@ -92,6 +92,24 @@ def update_config():
     bot.log(f"Config Updated: Size={bot.trade_size}€, Whitelist Count={len(bot.whitelist)}")
     return jsonify({'status': 'success'})
 
+@app.route('/api/close/<symbol>', methods=['POST'])
+@requires_auth
+def close_trade(symbol):
+    success, msg = bot.force_close_trade(symbol)
+    if success:
+        return jsonify({'status': 'success', 'message': msg})
+    else:
+        return jsonify({'status': 'error', 'message': msg}), 400
+
+@app.route('/api/sweep_dust', methods=['POST'])
+@requires_auth
+def sweep_dust():
+    success, msg = bot.convert_dust_to_bnb()
+    if success:
+        return jsonify({'status': 'success', 'message': msg})
+    else:
+        return jsonify({'status': 'error', 'message': msg}), 400
+
 if __name__ == '__main__':
     debug_mode = os.getenv('APP_DEBUG', 'false').lower() == 'true'
     app.run(debug=debug_mode, host='0.0.0.0', port=5000, use_reloader=False)
