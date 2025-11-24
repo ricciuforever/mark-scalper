@@ -57,6 +57,8 @@ class TradingBot:
         self.ATR_PERIOD = 14
         self.VOLATILITY_THRESHOLD = 0.0005 # Min ATR/Price ratio
 
+        self.COMMISSION_RATE = 0.001 # 0.1% fee per operation (0.2% round trip)
+
         # Dynamic Trailing Take Profit Config
         # "Dynamic TP" as requested: Acts as a trailing exit that locks in profit.
         self.DYNAMIC_TP_TRIGGER = 0.005 # Start trailing ONLY after 0.5% profit
@@ -337,8 +339,19 @@ class TradingBot:
         if curr > trade.get('highest_price', 0.0):
             trade['highest_price'] = curr
 
-        trade['pnl_pct'] = (curr - trade['entry_price']) / trade['entry_price']
-        trade['pnl_abs'] = (curr - trade['entry_price']) * trade['quantity']
+        # Calcolo PnL Netto (incluso Fee stimate)
+        qty = trade['quantity']
+        entry_price = trade['entry_price']
+
+        buy_fee = entry_price * qty * self.COMMISSION_RATE
+        sell_fee_est = curr * qty * self.COMMISSION_RATE
+
+        gross_pnl = (curr - entry_price) * qty
+        net_pnl = gross_pnl - buy_fee - sell_fee_est
+
+        trade['pnl_abs'] = net_pnl
+        # PnL % Netto stimato
+        trade['pnl_pct'] = net_pnl / (entry_price * qty)
 
     def run_loop(self):
         while self.is_running:
@@ -620,13 +633,27 @@ class TradingBot:
                 total_eur_received = real_exit_price * qty_to_sell
 
             cost_basis = trade['entry_price'] * qty_to_sell
-            pnl_abs = total_eur_received - cost_basis
-            pnl_pct = (real_exit_price - trade['entry_price']) / trade['entry_price']
 
-            self.log(f"💰 CLOSED {symbol} | PnL: {pnl_abs:.4f}€")
+            # Calcolo Commissioni Reali
+            # Nota: Binance deduce la fee dalla quote currency (EUR) per le vendite se non usi BNB
+            # Qui assumiamo il calcolo standard 0.1% se non possiamo leggerlo esattamente dall'ordine
+
+            buy_fee = cost_basis * self.COMMISSION_RATE
+            sell_fee = total_eur_received * self.COMMISSION_RATE
+
+            # Se l'ordine contiene info sulle commissioni potremmo essere più precisi,
+            # ma l'API spot spesso ritorna commissioni in asset diversi (BNB).
+            # Per coerenza con la richiesta utente, applichiamo 0.1% fisso o configurato.
+
+            gross_pnl = total_eur_received - cost_basis
+            net_pnl = gross_pnl - buy_fee - sell_fee
+
+            net_pnl_pct = net_pnl / cost_basis
+
+            self.log(f"💰 CLOSED {symbol} | PnL: {net_pnl:.4f}€ (Net)")
 
             # 5. Archivia e Rimuovi (SOLO SU SUCCESSO)
-            self.archive_and_delete(symbol, real_exit_price, reason, pnl_abs, pnl_pct)
+            self.archive_and_delete(symbol, real_exit_price, reason, net_pnl, net_pnl_pct)
 
         except ClientError as e:
             self.log(f"❌ Sell Failed {symbol}: {e.error_message}")
