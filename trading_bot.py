@@ -50,6 +50,7 @@ class TradingBot:
 
         # --- Configurazione Dust ---
         self.DUST_THRESHOLD_EUR = 0.5
+        self.MIN_NOTIONAL = 5.5 # Binance Min Notional is usually 5 EUR/USD
 
         # --- Strategy Configuration ---
         self.ATR_PERIOD = 14
@@ -473,7 +474,7 @@ class TradingBot:
                 return
         else:
             # Pre-Trailing: Use Hard Safety Stop
-            safety_stop = trade.get('safety_sl_price', entry * 0.99)
+            safety_stop = float(trade.get('safety_sl_price', entry * 0.99))
             if curr <= safety_stop:
                 self.execute_sell(symbol, curr, "Safety Stop Loss")
                 return
@@ -514,11 +515,26 @@ class TradingBot:
             step_size = self.get_symbol_step_size(symbol)
             qty_to_sell = self.round_to_step_size(actual_balance, step_size)
 
+            # Check for Min Notional (Avoid infinite error loops on small balances)
+            value_eur = qty_to_sell * price
+            if value_eur < self.MIN_NOTIONAL:
+                 self.log(f"⚠️ Sell Skipped {symbol}: Value {value_eur:.2f}€ < Min Notional. Marking as DUST/CLOSED.")
+                 # Sync quantity to reality so UI updates
+                 trade['quantity'] = qty_to_sell
+                 trade['is_dust'] = True
+                 trade['error_state'] = False
+                 return
+
             if qty_to_sell <= 0:
                 self.log(f"⚠️ Sell Skipped {symbol}: Qty {actual_balance} too low for step {step_size}. Marking as DUST.")
                 trade['is_dust'] = True # Non proviamo più a venderlo attivamente
                 trade['error_state'] = False
                 return
+
+            # Update internal quantity if significantly different (Sync Fix)
+            if abs(trade['quantity'] - qty_to_sell) / (trade['quantity'] + 0.00001) > 0.1:
+                 self.log(f"⚠️ Quantity Sync {symbol}: Internal {trade['quantity']} -> Real {qty_to_sell}")
+                 trade['quantity'] = qty_to_sell
 
             # 3. Esegui Vendita
             order = self.client.new_order(symbol=symbol, side='SELL', type='MARKET', quantity=qty_to_sell)
