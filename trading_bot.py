@@ -343,6 +343,12 @@ class TradingBot:
         qty = trade['quantity']
         entry_price = trade['entry_price']
 
+        # Prevent Division by Zero
+        if qty == 0 or entry_price == 0:
+            trade['pnl_abs'] = 0.0
+            trade['pnl_pct'] = 0.0
+            return
+
         buy_fee = entry_price * qty * self.COMMISSION_RATE
         sell_fee_est = curr * qty * self.COMMISSION_RATE
 
@@ -481,7 +487,10 @@ class TradingBot:
 
         # 2. Dynamic Trailing Take Profit (Dynamic TP)
         # Activate trailing ONLY after profit > DYNAMIC_TP_TRIGGER
-        profit_pct = (highest - entry) / entry
+        if entry > 0:
+            profit_pct = (highest - entry) / entry
+        else:
+            profit_pct = 0.0
 
         if profit_pct >= self.DYNAMIC_TP_TRIGGER:
             # Dynamic TP Logic: Follow price with DYNAMIC_TP_STEP distance
@@ -648,7 +657,10 @@ class TradingBot:
             gross_pnl = total_eur_received - cost_basis
             net_pnl = gross_pnl - buy_fee - sell_fee
 
-            net_pnl_pct = net_pnl / cost_basis
+            if cost_basis != 0:
+                net_pnl_pct = net_pnl / cost_basis
+            else:
+                net_pnl_pct = 0.0
 
             self.log(f"💰 CLOSED {symbol} | PnL: {net_pnl:.4f}€ (Net)")
 
