@@ -1,5 +1,7 @@
 flask
-binance-connector
 pandas
 numpy
+binance-connector
+sqlalchemy
+aiohttp
 python-dotenv

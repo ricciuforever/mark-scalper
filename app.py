@@ -1,45 +1,51 @@
-from flask import Flask, render_template, jsonify, request, Response
 import os
-import hmac
-from functools import wraps
-from dotenv import load_dotenv
-from trading_bot import TradingBot
 import threading
+import logging
+import hmac
+import hashlib
+from functools import wraps
+from flask import Flask, render_template, jsonify, request, Response
+from dotenv import load_dotenv
+from mark_core import MarkBot
+from database import DatabaseManager, ActiveTrade, TradeHistory
+from datetime import datetime, timedelta
+import time
+from binance.spot import Spot
 
+# Load Env
 load_dotenv()
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'markv2_secret_key'
+
+# Basic Auth Credentials
+ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin')
 
 # Initialize Bot
-BINANCE_API = os.getenv('BINANCE_API')
-BINANCE_SECRET = os.getenv('BINANCE_SECRET')
+API_KEY = os.getenv('BINANCE_API_KEY', '')
+API_SECRET = os.getenv('BINANCE_API_SECRET', '')
 
-bot = TradingBot(BINANCE_API, BINANCE_SECRET)
+# Global Bot Instance
+bot = MarkBot(API_KEY, API_SECRET)
 
-# Authentication Configuration
-ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
-ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
+# Helper for DB
+db = DatabaseManager()
 
-if not ADMIN_PASSWORD:
-    print("⚠️ WARNING: ADMIN_PASSWORD not set in environment variables. Admin access will be disabled or insecure.")
-
+# --- Auth Decorator ---
 def check_auth(username, password):
-    """Checks if the username and password combination is valid."""
-    if not ADMIN_PASSWORD:
-        return False
-
-    # Use hmac.compare_digest for constant-time comparison to prevent timing attacks
-    user_match = hmac.compare_digest(username, ADMIN_USER)
-    pass_match = hmac.compare_digest(password, ADMIN_PASSWORD)
-
-    return user_match and pass_match
+    """Checks credentials safely."""
+    # Constant time comparison to prevent timing attacks
+    user_ok = hmac.compare_digest(username, ADMIN_USER)
+    pass_ok = hmac.compare_digest(password, ADMIN_PASSWORD)
+    return user_ok and pass_ok
 
 def authenticate():
-    """Sends a 401 response that enables basic auth."""
+    """Sends a 401 response that enables basic auth"""
     return Response(
-        'Could not verify your access level for that URL.\n'
-        'You have to login with proper credentials', 401,
-        {'WWW-Authenticate': 'Basic realm="Login Required"'})
+    'Could not verify your access level for that URL.\n'
+    'You have to login with proper credentials', 401,
+    {'WWW-Authenticate': 'Basic realm="Mark V2 Login"'})
 
 def requires_auth(f):
     @wraps(f)
@@ -50,81 +56,216 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+# --- Routes ---
+
 @app.route('/')
-@app.route('/index.html')
+@requires_auth
 def index():
     return render_template('index.html')
 
-@app.route('/admin')
-@requires_auth
-def admin():
-    return render_template('admin.html')
-
 @app.route('/api/status')
+@requires_auth
 def status():
-    return jsonify(bot.get_status_data())
+    session = db.get_session()
+    try:
+        active_trades = session.query(ActiveTrade).all()
+        # Convert to list of dicts
+        trades_data = []
+        total_market_val = 0.0
+        total_cost = 0.0
 
-@app.route('/api/stats')
-def stats():
-    history = bot.get_historical_pnl()
+        for t in active_trades:
+            # We can use the bot's fast price cache for display
+            current_p = bot.get_current_price_fast(t.symbol)
+            if current_p == 0: current_p = t.current_price
+
+            val = t.quantity * current_p
+            total_market_val += val
+            total_cost += t.total_cost
+
+            pnl = val - t.total_cost
+            pnl_pct = (pnl / t.total_cost) * 100 if t.total_cost > 0 else 0
+
+            trades_data.append({
+                'symbol': t.symbol,
+                'entry_price': t.entry_price,
+                'quantity': t.quantity,
+                'current_price': current_p,
+                'pnl_abs': pnl,
+                'pnl_pct': pnl_pct,
+                'safety_orders': t.safety_order_count,
+                'next_so_price': t.next_safety_order_price,
+                'tp_price': t.entry_price * (1 + bot.tp_percent),
+                'is_dust': t.is_dust
+            })
+
+        # Recent History
+        history = session.query(TradeHistory).order_by(TradeHistory.close_time.desc()).limit(10).all()
+        history_data = [{
+            'symbol': h.symbol,
+            'pnl_abs': h.pnl_abs,
+            'pnl_pct': h.pnl_pct,
+            'close_time': h.close_time.strftime('%H:%M:%S')
+        } for h in history]
+
+        # Get Balance (Mock or Real)
+        total_realized = session.query(TradeHistory.pnl_abs).all()
+        sum_realized = sum([x[0] for x in total_realized])
+        estimated_balance = 1000.0 + sum_realized + (total_market_val - total_cost)
+
+        return jsonify({
+            'running': bot.running,
+            'status': bot.status_message,
+            'active_trades': trades_data,
+            'history': history_data,
+            'total_equity': estimated_balance,
+            'logs': bot.logs[:20]
+        })
+    finally:
+        session.close()
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+@requires_auth
+def settings():
+    if request.method == 'POST':
+        data = request.json
+        if 'base_order_size' in data:
+            db.set_setting('base_order_size', data['base_order_size'])
+        if 'max_safety_orders' in data:
+            db.set_setting('max_safety_orders', data['max_safety_orders'])
+
+        # Reload bot settings
+        bot.load_settings()
+        return jsonify({'status': 'ok'})
+
     return jsonify({
-        'total_pnl': history['total_realized_pnl'],
-        'chart_data': history
+        'base_order_size': bot.base_order_size,
+        'max_safety_orders': bot.max_safety_orders,
+        'dca_volume_scale': bot.dca_volume_scale,
+        'dca_step_scale': bot.dca_step_scale
     })
 
-@app.route('/api/start', methods=['POST'])
+@app.route('/api/control', methods=['POST'])
 @requires_auth
-def start_bot():
-    if not bot.is_running:
+def control():
+    action = request.json.get('action')
+    if action == 'start':
         bot.start()
-        return jsonify({'status': 'started'})
-    return jsonify({'status': 'already_running'})
-
-@app.route('/api/stop', methods=['POST'])
-@requires_auth
-def stop_bot():
-    if bot.is_running:
+    elif action == 'stop':
         bot.stop()
-        return jsonify({'status': 'stopped'})
-    return jsonify({'status': 'not_running'})
+    elif action == 'sweep':
+        # Run in thread to avoid blocking
+        threading.Thread(target=bot.sweep_dust).start()
+    elif action == 'close':
+        symbol = request.json.get('symbol')
+        if symbol:
+            threading.Thread(target=bot.force_close, args=(symbol,)).start()
 
-@app.route('/api/config', methods=['POST'])
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/chart')
 @requires_auth
-def update_config():
-    data = request.json
+def chart_data():
+    session = db.get_session()
+    try:
+        # 1. Get History Dates
+        trades = session.query(TradeHistory).order_by(TradeHistory.close_time).all()
 
-    if 'whitelist' in data:
-        raw_list = data['whitelist'].split(',')
-        cleaned_list = [s.strip().upper() for s in raw_list if s.strip()]
-        bot.whitelist = cleaned_list
+        daily_pnl = {}
+        first_date = None
+        last_date = None
 
-    if 'trade_size' in data:
+        for t in trades:
+            d = t.close_time.strftime('%Y-%m-%d')
+            if not first_date: first_date = d
+            last_date = d
+            daily_pnl[d] = daily_pnl.get(d, 0) + t.pnl_abs
+
+        # If no history, return empty or dummy
+        if not first_date:
+            return jsonify({'dates': [], 'bot_pct': [], 'btc_pct': []})
+
+        dates = sorted(list(daily_pnl.keys()))
+
+        # 2. Build Bot Equity Curve
+        bot_equity = []
+        running_pnl = 0
+        for d in dates:
+            running_pnl += daily_pnl[d]
+            pct_gain = (running_pnl / 1000.0) * 100
+            bot_equity.append(pct_gain)
+
+        # 3. Fetch BTC Benchmark
+        # We need daily klines from first_date to now
+        btc_benchmark = []
         try:
-            bot.trade_size = float(data['trade_size'])
-        except ValueError:
-            pass
+            # Convert start date to TS
+            dt_obj = datetime.strptime(first_date, "%Y-%m-%d")
+            start_ts = int(dt_obj.timestamp() * 1000)
 
-    bot.log(f"Config Updated: Size={bot.trade_size}€, Whitelist Count={len(bot.whitelist)}")
-    return jsonify({'status': 'success'})
+            # Use a fresh client for this request to avoid conflict
+            client = Spot() # Public data doesn't need keys
+            klines = client.klines("BTCEUR", "1d", startTime=start_ts, limit=1000)
 
-@app.route('/api/close/<symbol>', methods=['POST'])
-@requires_auth
-def close_trade(symbol):
-    success, msg = bot.force_close_trade(symbol)
-    if success:
-        return jsonify({'status': 'success', 'message': msg})
+            # Map Date -> Close Price
+            btc_prices = {}
+            base_price = None
+
+            for k in klines:
+                # k[0] is Open Time
+                k_date = datetime.fromtimestamp(k[0]/1000).strftime('%Y-%m-%d')
+                close_p = float(k[4])
+                btc_prices[k_date] = close_p
+
+                # Determine Base Price (Open price of first day)
+                if k_date == first_date and base_price is None:
+                    base_price = float(k[1]) # Open
+
+            # Fallback
+            if base_price is None and klines:
+                base_price = float(klines[0][1])
+
+            # Generate Benchmark Data for each trade date
+            if base_price:
+                for d in dates:
+                    # Find closest price
+                    price = btc_prices.get(d)
+                    # If date missing in BTC (e.g. today not closed), use last known
+                    if not price and btc_prices:
+                        price = list(btc_prices.values())[-1]
+
+                    if price:
+                        pct = ((price - base_price) / base_price) * 100
+                        btc_benchmark.append(pct)
+                    else:
+                         btc_benchmark.append(0.0)
+            else:
+                 btc_benchmark = [0.0] * len(dates)
+
+        except Exception as e:
+            print(f"Benchmark Error: {e}")
+            btc_benchmark = [0.0] * len(dates)
+
+        return jsonify({
+            'dates': dates,
+            'bot_pct': bot_equity,
+            'btc_pct': btc_benchmark
+        })
+    finally:
+        session.close()
+
+# Start Bot on App Startup
+def start_bot_thread():
+    # Wait a bit for DB init
+    time.sleep(2)
+    # Ensure keys are present before starting
+    if API_KEY and API_SECRET:
+        bot.start()
     else:
-        return jsonify({'status': 'error', 'message': msg}), 400
+        print("⚠️ Bot not started automatically: Missing API Keys in .env")
 
-@app.route('/api/sweep_dust', methods=['POST'])
-@requires_auth
-def sweep_dust():
-    success, msg = bot.convert_dust_to_bnb()
-    if success:
-        return jsonify({'status': 'success', 'message': msg})
-    else:
-        return jsonify({'status': 'error', 'message': msg}), 400
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    threading.Thread(target=start_bot_thread, daemon=True).start()
 
 if __name__ == '__main__':
-    debug_mode = os.getenv('APP_DEBUG', 'false').lower() == 'true'
-    app.run(debug=debug_mode, host='0.0.0.0', port=5000, use_reloader=False)
+    app.run(host='0.0.0.0', port=5000)
