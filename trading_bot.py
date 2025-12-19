@@ -405,19 +405,11 @@ class TradingBot:
         if len([t for t in self.active_trades.values() if not t.get('is_dust')]) >= 10:
             return
 
-        # 1. Trend Filter (15m) - High Level Direction
-        df_15m = self.fetch_ohlcv(symbol, '15m')
-        if df_15m is None: return
-        df_15m = self.calculate_indicators(df_15m, '15m')
-        last_15m = df_15m.iloc[-1]
+        # OPTIMIZATION: Check 1m Trigger FIRST because it is much rarer (<1% chance)
+        # compared to 15m Trend check (~50% chance). This saves one API call per symbol/cycle
+        # in the vast majority of cases.
 
-        if pd.isna(last_15m['ema_99']): return
-
-        # Higher Timeframe Trend Condition
-        if last_15m['close'] <= last_15m['ema_99']:
-            return # Trend is DOWN/WEAK on 15m, ignore.
-
-        # 2. Execution Trigger (1m)
+        # 1. Execution Trigger (1m)
         df_1m = self.fetch_ohlcv(symbol, '1m')
         if df_1m is None: return
         df_1m = self.calculate_indicators(df_1m, '1m')
@@ -435,8 +427,21 @@ class TradingBot:
         k_cross_up = prev_1m['stoch_k'] < prev_1m['stoch_d'] and curr_1m['stoch_k'] > curr_1m['stoch_d']
         is_oversold = prev_1m['stoch_k'] < 20
 
+        # Only if Trigger is VALID, check the 15m Trend
         if is_aligned and k_cross_up and is_oversold:
-            self.execute_buy(symbol, curr_1m['close'])
+
+            # 2. Trend Filter (15m) - High Level Direction
+            df_15m = self.fetch_ohlcv(symbol, '15m')
+            if df_15m is None: return
+            df_15m = self.calculate_indicators(df_15m, '15m')
+            last_15m = df_15m.iloc[-1]
+
+            if pd.isna(last_15m['ema_99']): return
+
+            # Higher Timeframe Trend Condition
+            if last_15m['close'] > last_15m['ema_99']:
+                # Both conditions met!
+                self.execute_buy(symbol, curr_1m['close'])
 
     def execute_buy(self, symbol, price):
         if not self.client: return
