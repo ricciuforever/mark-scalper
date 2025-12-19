@@ -17,8 +17,9 @@
     </style>
 </head>
 <body>
+<a href="#main-content" class="btn btn-light visually-hidden-focusable position-absolute top-0 start-0 m-2">Skip to content</a>
 
-<div class="container-fluid p-4">
+<div class="container-fluid p-4" id="main-content">
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h3>🚀 Binance Scalper <small class="text-danger fs-6 fw-bold">{% block subtitle %}REAL TRADING{% endblock %}</small></h3>
         <div>
@@ -43,7 +44,7 @@
                 <div class="card-body">
                     <div class="d-flex align-items-center justify-content-between mb-0">
                         <div>
-                            <div id="statusDot" class="status-indicator status-stopped"></div>
+                            <div id="statusDot" class="status-indicator status-stopped" role="status" aria-label="Bot status indicator"></div>
                             <span id="currentAction" class="text-muted">Idle</span>
                         </div>
                     </div>
@@ -214,7 +215,7 @@
 
                         let actionBtn = '';
                         if (isAdmin) {
-                            actionBtn = `<button class="btn btn-danger btn-sm py-0" onclick="closeTrade('${sym}')">X</button>`;
+                            actionBtn = `<button class="btn btn-danger btn-sm py-0" onclick="closeTrade('${sym}')" aria-label="Close trade for ${sym}" title="Close trade for ${sym}">&times;</button>`;
                         }
 
                         const row = `<tr>
