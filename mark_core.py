@@ -1,0 +1,479 @@
+import asyncio
+import logging
+import json
+import threading
+from datetime import datetime
+import pandas as pd
+import numpy as np
+from sqlalchemy.orm import scoped_session
+from binance.websocket.spot.websocket_stream import SpotWebsocketStreamClient
+from binance.spot import Spot
+from binance.error import ClientError
+from database import DatabaseManager, ActiveTrade, TradeHistory, Settings
+
+# Helper to round quantities
+def round_step_size(quantity, step_size):
+    if step_size == 0: return quantity
+    # Use string formatting to avoid float precision issues
+    precision = int(round(-np.log10(step_size), 0))
+    return float(f"{quantity:.{precision}f}")
+
+class MarkBot:
+    def __init__(self, api_key, api_secret):
+        self.api_key = api_key
+        self.api_secret = api_secret
+
+        # Database
+        self.db_manager = DatabaseManager()
+        self.Session = scoped_session(self.db_manager.Session)
+
+        # Binance Clients
+        self.client = Spot(api_key=api_key, api_secret=api_secret)
+        self.ws_client = None
+
+        # State
+        self.whitelist = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'ADA', 'DOGE']
+        self.quote_currency = 'EUR'
+        self.klines_cache = {}
+        self.exchange_info = {}
+        self.running = False
+        self.loop = None
+        self.status_message = "Initializing..."
+        self.logs = []
+        self.cache_lock = threading.Lock()
+
+        # Strategy Config
+        self.base_order_size = 50.0
+        self.max_safety_orders = 3
+        self.dca_volume_scale = 1.5
+        self.dca_step_scale = 0.02 # 2%
+        self.tp_percent = 0.015 # 1.5%
+        self.safety_sl_percent = 0.10 # 10%
+
+        self.load_settings()
+        self.update_exchange_info()
+
+    def log(self, message):
+        ts = datetime.now().strftime("%H:%M:%S")
+        msg = f"[{ts}] {message}"
+        self.logs.insert(0, msg)
+        if len(self.logs) > 100: self.logs.pop()
+        print(msg)
+
+    def load_settings(self):
+        try:
+            self.base_order_size = self.db_manager.get_setting('base_order_size', 50.0, float)
+            self.max_safety_orders = self.db_manager.get_setting('max_safety_orders', 3, int)
+            self.dca_volume_scale = self.db_manager.get_setting('dca_volume_scale', 1.5, float)
+            self.dca_step_scale = self.db_manager.get_setting('dca_step_scale', 0.02, float)
+            self.tp_percent = self.db_manager.get_setting('tp_percent', 0.015, float)
+            self.safety_sl_percent = self.db_manager.get_setting('safety_sl_percent', 0.10, float)
+        except Exception as e:
+            self.log(f"Error loading settings: {e}")
+
+    def update_exchange_info(self):
+        try:
+            info = self.client.exchange_info()
+            for s in info['symbols']:
+                if s['symbol'].endswith(self.quote_currency):
+                    filters = {f['filterType']: f for f in s['filters']}
+                    lot_size = filters.get('LOT_SIZE')
+                    min_notional = filters.get('NOTIONAL') or filters.get('MIN_NOTIONAL')
+
+                    self.exchange_info[s['symbol']] = {
+                        'step_size': float(lot_size['stepSize']) if lot_size else 0.0,
+                        'min_notional': float(min_notional['minNotional']) if min_notional else 5.5
+                    }
+        except Exception as e:
+            self.log(f"ExInfo Error: {e}")
+
+    # --- WebSocket Handling ---
+    def start(self):
+        if self.running: return
+        self.running = True
+        self.log("Mark V2 Starting...")
+
+        self.ws_client = SpotWebsocketStreamClient(
+            on_message=self.on_kline_message,
+            is_combined=True
+        )
+
+        for coin in self.whitelist:
+            symbol = f"{coin}{self.quote_currency}"
+            self.ws_client.kline(symbol=symbol, interval='1m')
+
+        threading.Thread(target=self._run_async_loop, daemon=True).start()
+
+    def stop(self):
+        self.running = False
+        if self.ws_client:
+            self.ws_client.stop()
+        self.log("Mark V2 Stopped.")
+
+    def _run_async_loop(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.main_loop())
+
+    async def main_loop(self):
+        while self.running:
+            try:
+                self.check_strategies()
+                self.status_message = "Running - Monitoring Markets"
+                await asyncio.sleep(1)
+            except Exception as e:
+                self.log(f"Loop Error: {e}")
+                await asyncio.sleep(5)
+
+    def on_kline_message(self, _, msg):
+        try:
+            data = None
+            if isinstance(msg, str):
+                msg = json.loads(msg)
+
+            if 'data' in msg:
+                data = msg['data']
+            elif 'k' in msg:
+                data = msg
+
+            if data and 'k' in data:
+                k = data['k']
+                symbol = data['s']
+                self.update_kline_cache(symbol, k)
+
+        except Exception as e:
+            pass
+
+    def update_kline_cache(self, symbol, kline):
+        with self.cache_lock:
+            data = {
+                'ts': pd.to_datetime(kline['t'], unit='ms'),
+                'open': float(kline['o']),
+                'high': float(kline['h']),
+                'low': float(kline['l']),
+                'close': float(kline['c']),
+                'volume': float(kline['v'])
+            }
+
+            if symbol not in self.klines_cache:
+                self.klines_cache[symbol] = pd.DataFrame([data])
+            else:
+                df = self.klines_cache[symbol]
+                if df.iloc[-1]['ts'] == data['ts']:
+                    df.iloc[-1] = data
+                else:
+                    df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
+                    if len(df) > 100:
+                        df = df.iloc[-100:]
+                self.klines_cache[symbol] = df
+
+    # --- Indicators ---
+    def calculate_indicators(self, symbol):
+        with self.cache_lock:
+            df = self.klines_cache.get(symbol)
+            if df is None or len(df) < 20: return None
+            df = df.copy()
+
+        df['ma20'] = df['close'].rolling(window=20).mean()
+        df['std20'] = df['close'].rolling(window=20).std()
+        df['upper_bb'] = df['ma20'] + (2.0 * df['std20'])
+        df['lower_bb'] = df['ma20'] - (2.0 * df['std20'])
+
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss.replace(0, 0.000001)
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        return df.iloc[-1]
+
+    # --- STRATEGY ENGINE ---
+    def check_strategies(self):
+        session = self.Session()
+        try:
+            active_trades = {t.symbol: t for t in session.query(ActiveTrade).all()}
+
+            for coin in self.whitelist:
+                symbol = f"{coin}{self.quote_currency}"
+
+                # Check Indicators
+                last_candle = self.calculate_indicators(symbol)
+                if last_candle is None: continue
+
+                current_price = last_candle['close']
+
+                # Update Active Trade status
+                if symbol in active_trades:
+                    trade = active_trades[symbol]
+                    self.manage_active_trade(session, trade, current_price)
+                else:
+                    self.scan_for_entry(symbol, last_candle)
+
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            self.log(f"Strategy Error: {e}")
+        finally:
+            session.close()
+
+    def scan_for_entry(self, symbol, candle):
+        # Entry Condition: RSI < 30 AND Price < Lower BB
+        if pd.isna(candle['rsi']) or pd.isna(candle['lower_bb']): return
+
+        if candle['rsi'] < 30 and candle['close'] < candle['lower_bb']:
+            self.execute_buy(symbol, self.base_order_size, "Initial Entry")
+
+    def manage_active_trade(self, session, trade, current_price):
+        # Update current price in DB
+        trade.current_price = current_price
+        if current_price > trade.highest_price:
+            trade.highest_price = current_price
+
+        # 1. Take Profit
+        # Target: Avg Entry * (1 + TP%)
+        # Note: In V2 we use simple Fixed TP from avg price.
+        # Future: Could add trailing here too.
+
+        avg_price = trade.entry_price # This is the WEIGHTED AVERAGE
+        tp_price = avg_price * (1 + self.tp_percent)
+
+        if current_price >= tp_price:
+            self.execute_sell(trade, current_price, "Take Profit")
+            return
+
+        # 2. Safety Orders (DCA)
+        # Trigger: Price < Next Safety Order Price
+
+        # Calculate Next SO Price if not set (e.g. fresh migration)
+        if trade.next_safety_order_price == 0:
+             # Default fallback: 2% below avg
+             trade.next_safety_order_price = avg_price * (1 - self.dca_step_scale)
+
+        if trade.safety_order_count < self.max_safety_orders:
+            if current_price <= trade.next_safety_order_price:
+                self.execute_safety_order(trade, current_price)
+                return
+
+        # 3. Hard Stop Loss
+        # Only if price drops significantly below (e.g. 10%) total avg price
+        stop_price = avg_price * (1 - self.safety_sl_percent)
+        if current_price <= stop_price:
+            self.execute_sell(trade, current_price, "Hard Stop Loss")
+            return
+
+    def execute_buy(self, symbol, amount_eur, reason):
+        # 1. Get step size
+        info = self.exchange_info.get(symbol, {'step_size': 0.00001, 'min_notional': 5.0})
+
+        # 2. Calculate Quantity
+        price = self.get_current_price_fast(symbol)
+        if price == 0: return
+
+        quantity = amount_eur / price
+        quantity = round_step_size(quantity, info['step_size'])
+
+        if (quantity * price) < info['min_notional']:
+            self.log(f"⚠️ Order too small for {symbol}: {amount_eur}€")
+            return
+
+        try:
+            self.log(f"🛒 BUY {symbol} ({amount_eur}€) - {reason}")
+            # Real Order
+            order = self.client.new_order(symbol=symbol, side='BUY', type='MARKET', quoteOrderQty=amount_eur)
+
+            # Parse result
+            filled_qty = float(order['executedQty'])
+            spent_eur = float(order['cummulativeQuoteQty'])
+            avg_fill_price = spent_eur / filled_qty
+
+            # Save to DB
+            session = self.Session()
+            try:
+                trade = ActiveTrade(
+                    symbol=symbol,
+                    entry_price=avg_fill_price,
+                    quantity=filled_qty,
+                    current_price=avg_fill_price,
+                    safety_order_count=0,
+                    highest_price=avg_fill_price,
+                    base_order_price=avg_fill_price,
+                    total_cost=spent_eur,
+                    next_safety_order_price=avg_fill_price * (1 - self.dca_step_scale)
+                )
+                session.add(trade)
+                session.commit()
+                self.log(f"✅ Position Opened {symbol}")
+            except Exception as db_e:
+                session.rollback()
+                self.log(f"DB Error on Buy: {db_e}")
+            finally:
+                session.close()
+
+        except Exception as e:
+            self.log(f"❌ Buy Failed {symbol}: {e}")
+
+    def execute_safety_order(self, trade, current_price):
+        symbol = trade.symbol
+        # Calculate Size: Base * (Scale ^ Count) ?
+        # Or Previous Order * Scale?
+        # Requirement: "Multiplier 1.5x of the previous order size"
+        # We need to know previous order size.
+        # For simplicity/robustness, let's calculate based on base_order * (scale ^ count)
+        # Count starts at 0 (Base). So SO #1 (count 0 -> 1) is Base * 1.5^1?
+
+        # Let's say Base=50. SO1 = 50*1.5=75. SO2 = 75*1.5=112.5.
+        next_count = trade.safety_order_count + 1
+        size_eur = self.base_order_size * (self.dca_volume_scale ** next_count)
+
+        self.log(f"🛡️ Safety Order #{next_count} for {symbol} ({size_eur:.2f}€)")
+
+        info = self.exchange_info.get(symbol, {'step_size': 0.00001, 'min_notional': 5.0})
+        quantity = size_eur / current_price
+        quantity = round_step_size(quantity, info['step_size'])
+
+        try:
+            order = self.client.new_order(symbol=symbol, side='BUY', type='MARKET', quoteOrderQty=size_eur)
+
+            filled_qty = float(order['executedQty'])
+            spent_eur = float(order['cummulativeQuoteQty'])
+
+            # Update Trade in DB
+            # We are inside manage_active_trade which holds a session, but trade object might be detached?
+            # It was passed from manage_active_trade, so it's attached.
+
+            trade.quantity += filled_qty
+            trade.total_cost += spent_eur
+
+            # New Weighted Average Price
+            trade.entry_price = trade.total_cost / trade.quantity
+            trade.safety_order_count = next_count
+
+            # Update Next Target
+            trade.next_safety_order_price = trade.entry_price * (1 - self.dca_step_scale)
+
+            self.log(f"✅ DCA Executed {symbol}. New Avg: {trade.entry_price:.4f}")
+
+        except Exception as e:
+            self.log(f"❌ DCA Failed {symbol}: {e}")
+            # Could prevent retrying immediately by checking time or setting error flag
+
+    def execute_sell(self, trade, price, reason):
+        symbol = trade.symbol
+        qty = trade.quantity
+
+        info = self.exchange_info.get(symbol, {'step_size': 0.00001})
+        qty_to_sell = round_step_size(qty, info['step_size'])
+
+        try:
+            self.log(f"📉 SELLING {symbol} ({reason})...")
+
+            # Order
+            order = self.client.new_order(symbol=symbol, side='SELL', type='MARKET', quantity=qty_to_sell)
+
+            total_received = float(order['cummulativeQuoteQty'])
+            exit_price = total_received / float(order['executedQty'])
+
+            # Calculate PnL
+            # Fee is approx 0.1% on sell (deducted from received EUR usually)
+            # Net PnL = Received - Cost - (Cost*0.001 [Buy Fee]) - (Received*0.001 [Sell Fee])
+            # Simplified:
+
+            gross_pnl = total_received - trade.total_cost
+            fees = (trade.total_cost * 0.001) + (total_received * 0.001)
+            net_pnl = gross_pnl - fees
+            pnl_pct = (net_pnl / trade.total_cost) * 100
+
+            # Archive
+            session = self.Session()
+            try:
+                # Delete active
+                session.query(ActiveTrade).filter_by(symbol=symbol).delete()
+
+                # Add history
+                hist = TradeHistory(
+                    symbol=symbol,
+                    entry_price=trade.entry_price,
+                    exit_price=exit_price,
+                    quantity=qty_to_sell,
+                    pnl_abs=net_pnl,
+                    pnl_pct=pnl_pct,
+                    reason=reason,
+                    close_time=datetime.utcnow()
+                )
+                session.add(hist)
+                session.commit()
+                self.log(f"💰 SOLD {symbol} | PnL: {net_pnl:.2f}€ ({pnl_pct:.2f}%)")
+            except Exception as e:
+                self.log(f"DB Error Archive: {e}")
+                session.rollback()
+            finally:
+                session.close()
+
+        except Exception as e:
+            self.log(f"❌ Sell Failed {symbol}: {e}")
+            # Check for dust
+            if "Account has insufficient balance" in str(e) or "Filter failure: LOT_SIZE" in str(e):
+                self.handle_dust_error(trade)
+
+    def handle_dust_error(self, trade):
+        # Mark as dust or remove if value is tiny
+        val = trade.quantity * trade.current_price
+        if val < 5.0:
+            session = self.Session()
+            try:
+                t = session.query(ActiveTrade).filter_by(symbol=trade.symbol).first()
+                if t:
+                    t.is_dust = True
+                    t.last_error = "Dust/MinNotional"
+                session.commit()
+                self.log(f"⚠️ Marked {trade.symbol} as Dust")
+            finally:
+                session.close()
+
+    def force_close(self, symbol):
+        # Manually sell
+        session = self.Session()
+        trade = session.query(ActiveTrade).filter_by(symbol=symbol).first()
+        if trade:
+            # We call execute_sell directly.
+            # Note: execute_sell needs 'trade' object. If we pass the one from this session,
+            # and execute_sell creates its own session to delete, it might conflict if not handled.
+            # In my implementation execute_sell creates a NEW session for DB ops.
+            # So we should pass a detached object or handle session carefully.
+            # Best to just pass the data object, but execute_sell needs to delete by symbol.
+
+            current_price = self.get_current_price_fast(symbol)
+            self.execute_sell(trade, current_price, "Manual Force Close")
+        session.close()
+
+    def sweep_dust(self):
+        # Identify dust and convert to BNB
+        try:
+            session = self.Session()
+            dust_trades = session.query(ActiveTrade).filter_by(is_dust=True).all()
+            assets = [t.symbol.replace(self.quote_currency, '') for t in dust_trades]
+
+            if assets:
+                self.log(f"🧹 Sweeping: {assets}")
+                self.client.transfer_dust(asset=assets)
+
+                # Cleanup DB
+                for t in dust_trades:
+                    session.delete(t)
+                session.commit()
+        except Exception as e:
+            self.log(f"Sweep Error: {e}")
+        finally:
+            session.close()
+
+    def get_current_price_fast(self, symbol):
+        # Try cache first
+        with self.cache_lock:
+            df = self.klines_cache.get(symbol)
+            if df is not None:
+                return df.iloc[-1]['close']
+        # Fallback to API
+        try:
+            return float(self.client.ticker_price(symbol)['price'])
+        except:
+            return 0.0
