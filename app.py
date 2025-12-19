@@ -1,5 +1,6 @@
 from flask import Flask, render_template, jsonify, request, Response
 import os
+import hmac
 from functools import wraps
 from dotenv import load_dotenv
 from trading_bot import TradingBot
@@ -15,9 +16,23 @@ BINANCE_SECRET = os.getenv('BINANCE_SECRET')
 
 bot = TradingBot(BINANCE_API, BINANCE_SECRET)
 
+# Authentication Configuration
+ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
+
+if not ADMIN_PASSWORD:
+    print("⚠️ WARNING: ADMIN_PASSWORD not set in environment variables. Admin access will be disabled or insecure.")
+
 def check_auth(username, password):
     """Checks if the username and password combination is valid."""
-    return username == 'admin' and password == 'Giusy.7@'
+    if not ADMIN_PASSWORD:
+        return False
+
+    # Use hmac.compare_digest for constant-time comparison to prevent timing attacks
+    user_match = hmac.compare_digest(username, ADMIN_USER)
+    pass_match = hmac.compare_digest(password, ADMIN_PASSWORD)
+
+    return user_match and pass_match
 
 def authenticate():
     """Sends a 401 response that enables basic auth."""
