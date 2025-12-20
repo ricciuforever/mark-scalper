@@ -35,7 +35,8 @@
                 <div class="card text-center text-bg-primary mb-3">
                     <div class="card-body">
                         <h5 class="card-title">Total Balance</h5>
-                        <p class="card-text fs-3" id="val-total">€...</p>
+                        <p class="card-text fs-3 mb-0" id="val-total">€...</p>
+                        <small class="text-muted">PnL: <span id="pnlVal">---</span></small>
                     </div>
                 </div>
             </div>
@@ -103,6 +104,10 @@
                         <div class="input-group mb-2">
                             <span class="input-group-text">Base Order (€)</span>
                             <input type="number" id="setting-base-order" class="form-control" value="50">
+                        </div>
+                        <div class="input-group mb-2">
+                            <span class="input-group-text">Max Budget (€)</span>
+                            <input type="number" id="setting-max-budget" class="form-control" value="500">
                             <button class="btn btn-outline-secondary" onclick="saveSettings()">Save</button>
                         </div>
                         <small class="text-muted">Safety Orders: <span id="setting-max-so">3</span> | Scale: 1.5x</small>
@@ -149,6 +154,11 @@
                     document.getElementById('val-total').innerText = `€${data.total_balance.toFixed(2)}`;
                     document.getElementById('val-available').innerText = `€${data.available_balance.toFixed(2)}`;
                     document.getElementById('val-invested').innerText = `€${data.invested_amount.toFixed(2)}`;
+
+                    // Total PnL
+                    const pnlSpan = document.getElementById('pnlVal');
+                    pnlSpan.innerText = `${data.total_pnl.toFixed(2)}€`;
+                    pnlSpan.className = data.total_pnl >= 0 ? 'pnl-green' : 'pnl-red';
 
                     // Active Trades
                     const tbody = document.getElementById('active-trades-body');
@@ -207,10 +217,10 @@
                 .then(data => {
                     const ctx = document.getElementById('performanceChart').getContext('2d');
 
-                    // Filter outlier data (simple visual fix)
-                    // If a point is > 500% or < -90%, cap it for display or let chart.js auto-skip if strictly needed.
-                    // But Chart.js auto-scaling should handle it if we don't set min/max manually.
-                    // We remove any manual min/max here.
+                    // Gradient Fill for Mark V2
+                    const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+                    gradient.addColorStop(0, 'rgba(40, 167, 69, 0.5)');   // Green opaque
+                    gradient.addColorStop(1, 'rgba(40, 167, 69, 0.0)');   // Transparent
 
                     if (!perfChart) {
                         perfChart = new Chart(ctx, {
@@ -222,6 +232,11 @@
                                         label: 'Mark V2 (%)',
                                         data: data.bot_pct,
                                         borderColor: '#28a745',
+                                        backgroundColor: gradient,
+                                        fill: true,
+                                        borderWidth: 3,
+                                        pointRadius: 0,
+                                        pointHoverRadius: 5,
                                         tension: 0.1
                                     },
                                     {
@@ -229,6 +244,9 @@
                                         data: data.btc_pct,
                                         borderColor: '#ffc107',
                                         borderDash: [5, 5],
+                                        borderWidth: 2,
+                                        pointRadius: 0,
+                                        pointHoverRadius: 5,
                                         tension: 0.1
                                     }
                                 ]
@@ -236,9 +254,18 @@
                             options: {
                                 responsive: true,
                                 maintainAspectRatio: false,
+                                interaction: {
+                                    mode: 'index',
+                                    intersect: false,
+                                },
                                 scales: {
+                                    x: {
+                                        ticks: {
+                                            maxTicksLimit: 8
+                                        }
+                                    },
                                     y: {
-                                        // Removed suggestedMin/Max to allow auto-scaling
+                                        // Auto-scale (no suggestedMin/Max)
                                         beginAtZero: false
                                     }
                                 }
@@ -283,16 +310,21 @@
 
         function saveSettings() {
             const size = document.getElementById('setting-base-order').value;
+            const budget = document.getElementById('setting-max-budget').value;
             fetch('/api/settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({base_order_size: size})
+                body: JSON.stringify({
+                    base_order_size: size,
+                    max_budget: budget
+                })
             }).then(r => r.json()).then(() => alert('Settings Saved!'));
         }
 
         // Initial Load
         fetch('/api/settings').then(r=>r.json()).then(d => {
             document.getElementById('setting-base-order').value = d.base_order_size;
+            document.getElementById('setting-max-budget').value = d.max_budget;
             document.getElementById('setting-max-so').innerText = d.max_safety_orders;
         });
 

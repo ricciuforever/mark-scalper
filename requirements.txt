@@ -3,5 +3,4 @@ pandas
 numpy
 binance-connector
 sqlalchemy
-aiohttp
 python-dotenv
