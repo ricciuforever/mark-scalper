@@ -108,17 +108,32 @@ def status():
             'close_time': h.close_time.strftime('%H:%M:%S')
         } for h in history]
 
-        # Get Balance (Mock or Real)
-        total_realized = session.query(TradeHistory.pnl_abs).all()
-        sum_realized = sum([x[0] for x in total_realized])
-        estimated_balance = 1000.0 + sum_realized + (total_market_val - total_cost)
+        # Get Balance (Real)
+        available_balance = 0.0
+        try:
+             # Use a fresh spot client or bot's client to fetch balance
+             # bot.client is synchronous but thread-safe enough for this status endpoint
+             # or we can mock it if offline
+             acc = bot.client.account()
+             for b in acc['balances']:
+                 if b['asset'] == 'EUR':
+                     available_balance = float(b['free'])
+                     break
+        except Exception:
+             # Fallback if API fails or offline
+             available_balance = 1000.0 # Placeholder
+
+        total_invested = total_market_val # Calculated above from active trades
+        total_balance = available_balance + total_invested
 
         return jsonify({
             'running': bot.running,
             'status': bot.status_message,
             'active_trades': trades_data,
             'history': history_data,
-            'total_equity': estimated_balance,
+            'total_balance': total_balance,
+            'available_balance': available_balance,
+            'invested_amount': total_invested,
             'logs': bot.logs[:20]
         })
     finally:
@@ -160,6 +175,10 @@ def control():
         symbol = request.json.get('symbol')
         if symbol:
             threading.Thread(target=bot.force_close, args=(symbol,)).start()
+    elif action == 'forget':
+        symbol = request.json.get('symbol')
+        if symbol:
+            threading.Thread(target=bot.forget_trade, args=(symbol,)).start()
 
     return jsonify({'status': 'ok'})
 

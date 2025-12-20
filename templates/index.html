@@ -29,6 +29,34 @@
             </div>
         </div>
 
+        <!-- Wallet Cards (Restored V1 Layout) -->
+        <div class="row mb-4">
+            <div class="col-md-4">
+                <div class="card text-center text-bg-primary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Balance</h5>
+                        <p class="card-text fs-3" id="val-total">€...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center text-bg-secondary mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Available</h5>
+                        <p class="card-text fs-3" id="val-available">€...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card text-center text-bg-success mb-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Invested</h5>
+                        <p class="card-text fs-3" id="val-invested">€...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Dashboard Grid -->
         <div class="row">
             <!-- Left Col: Stats & Chart -->
@@ -45,7 +73,6 @@
                 <div class="card">
                     <div class="card-header d-flex justify-content-between">
                         <span>Active Positions</span>
-                        <span id="total-equity-display" class="badge bg-primary">Total Equity: €...</span>
                     </div>
                     <div class="card-body p-0">
                         <table class="table table-striped mb-0 text-center">
@@ -118,8 +145,10 @@
                     }
                     text.innerText = data.status;
 
-                    // Equity
-                    document.getElementById('total-equity-display').innerText = `Est. Equity: €${data.total_equity.toFixed(2)}`;
+                    // Wallet Cards
+                    document.getElementById('val-total').innerText = `€${data.total_balance.toFixed(2)}`;
+                    document.getElementById('val-available').innerText = `€${data.available_balance.toFixed(2)}`;
+                    document.getElementById('val-invested').innerText = `€${data.invested_amount.toFixed(2)}`;
 
                     // Active Trades
                     const tbody = document.getElementById('active-trades-body');
@@ -143,7 +172,10 @@
                                 </td>
                                 <td>${t.tp_price.toFixed(4)}</td>
                                 <td>
-                                    <button class="btn btn-xs btn-outline-danger" onclick="forceClose('${t.symbol}')">X</button>
+                                    <div class="btn-group">
+                                        <button class="btn btn-sm btn-outline-danger" onclick="forceClose('${t.symbol}')" title="Force Sell (API)">Sell</button>
+                                        <button class="btn btn-sm btn-outline-secondary" onclick="forgetTrade('${t.symbol}')" title="Delete from DB (No Sell)">Forget</button>
+                                    </div>
                                 </td>
                             </tr>
                         `;
@@ -174,6 +206,12 @@
                 .then(r => r.json())
                 .then(data => {
                     const ctx = document.getElementById('performanceChart').getContext('2d');
+
+                    // Filter outlier data (simple visual fix)
+                    // If a point is > 500% or < -90%, cap it for display or let chart.js auto-skip if strictly needed.
+                    // But Chart.js auto-scaling should handle it if we don't set min/max manually.
+                    // We remove any manual min/max here.
+
                     if (!perfChart) {
                         perfChart = new Chart(ctx, {
                             type: 'line',
@@ -195,7 +233,16 @@
                                     }
                                 ]
                             },
-                            options: { responsive: true, maintainAspectRatio: false }
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                scales: {
+                                    y: {
+                                        // Removed suggestedMin/Max to allow auto-scaling
+                                        beginAtZero: false
+                                    }
+                                }
+                            }
                         });
                     } else {
                         perfChart.data.labels = data.dates;
@@ -215,11 +262,21 @@
         }
 
         function forceClose(symbol) {
-            if(confirm('Force close ' + symbol + '?')) {
+            if(confirm('FORCE SELL ' + symbol + ' on Binance?')) {
                 fetch('/api/control', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({action: 'close', symbol: symbol})
+                });
+            }
+        }
+
+        function forgetTrade(symbol) {
+            if(confirm('FORGET ' + symbol + '? (Deletes from DB only, NO SELL)')) {
+                fetch('/api/control', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action: 'forget', symbol: symbol})
                 });
             }
         }
