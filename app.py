@@ -8,6 +8,7 @@ from flask import Flask, render_template, jsonify, request, Response
 from dotenv import load_dotenv
 from mark_core import MarkBot
 from database import DatabaseManager, ActiveTrade, TradeHistory
+from sqlalchemy import func
 from datetime import datetime, timedelta
 import time
 from binance.spot import Spot
@@ -109,22 +110,27 @@ def status():
         } for h in history]
 
         # Get Balance (Real)
-        available_balance = 0.0
+        real_wallet_balance = 0.0
         try:
-             # Use a fresh spot client or bot's client to fetch balance
-             # bot.client is synchronous but thread-safe enough for this status endpoint
-             # or we can mock it if offline
              acc = bot.client.account()
              for b in acc['balances']:
                  if b['asset'] == 'EUR':
-                     available_balance = float(b['free'])
+                     real_wallet_balance = float(b['free'])
                      break
         except Exception:
-             # Fallback if API fails or offline
-             available_balance = 1000.0 # Placeholder
+             real_wallet_balance = 1000.0 # Fallback
 
-        total_invested = total_market_val # Calculated above from active trades
-        total_balance = available_balance + total_invested
+        total_invested = total_cost # Invested is cost basis, Market Value is separate
+
+        # Calculate Capped Available Balance for Bot
+        budget_remaining = max(0, bot.max_budget - total_invested)
+        available_balance = min(real_wallet_balance, budget_remaining)
+
+        # Total Balance displayed = Invested (Market Val) + Available (Capped)
+        total_balance = available_balance + total_market_val
+
+        # Calculate Total Realized PnL
+        total_realized_pnl = session.query(func.sum(TradeHistory.pnl_abs)).scalar() or 0.0
 
         return jsonify({
             'running': bot.running,
@@ -133,7 +139,8 @@ def status():
             'history': history_data,
             'total_balance': total_balance,
             'available_balance': available_balance,
-            'invested_amount': total_invested,
+            'invested_amount': total_market_val,
+            'total_pnl': total_realized_pnl,
             'logs': bot.logs[:20]
         })
     finally:
@@ -148,6 +155,8 @@ def settings():
             db.set_setting('base_order_size', data['base_order_size'])
         if 'max_safety_orders' in data:
             db.set_setting('max_safety_orders', data['max_safety_orders'])
+        if 'max_budget' in data:
+            db.set_setting('max_budget', data['max_budget'])
 
         # Reload bot settings
         bot.load_settings()
@@ -157,7 +166,8 @@ def settings():
         'base_order_size': bot.base_order_size,
         'max_safety_orders': bot.max_safety_orders,
         'dca_volume_scale': bot.dca_volume_scale,
-        'dca_step_scale': bot.dca_step_scale
+        'dca_step_scale': bot.dca_step_scale,
+        'max_budget': bot.max_budget
     })
 
 @app.route('/api/control', methods=['POST'])
@@ -283,8 +293,12 @@ def start_bot_thread():
     else:
         print("⚠️ Bot not started automatically: Missing API Keys in .env")
 
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
-    threading.Thread(target=start_bot_thread, daemon=True).start()
-
 if __name__ == '__main__':
+    # In debug mode, Flask reloader spawns a child process.
+    # WERKZEUG_RUN_MAIN is 'true' in that child process.
+    # In production (no debug), it's not set, so we must start here.
+
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+        threading.Thread(target=start_bot_thread, daemon=True).start()
+
     app.run(host='0.0.0.0', port=5000)

@@ -53,6 +53,7 @@ class MarkBot:
         self.dca_step_scale = 0.02 # 2%
         self.tp_percent = 0.015 # 1.5%
         self.safety_sl_percent = 0.10 # 10%
+        self.max_budget = 500.0 # Default budget cap
 
         self.load_settings()
         self.update_exchange_info()
@@ -72,6 +73,7 @@ class MarkBot:
             self.dca_step_scale = self.db_manager.get_setting('dca_step_scale', 0.02, float)
             self.tp_percent = self.db_manager.get_setting('tp_percent', 0.015, float)
             self.safety_sl_percent = self.db_manager.get_setting('safety_sl_percent', 0.10, float)
+            self.max_budget = self.db_manager.get_setting('max_budget', 500.0, float)
         except Exception as e:
             self.log(f"Error loading settings: {e}")
 
@@ -265,7 +267,26 @@ class MarkBot:
             self.execute_sell(trade, current_price, "Hard Stop Loss")
             return
 
+    def check_budget(self, required_amount):
+        """Checks if spending 'required_amount' exceeds max_budget."""
+        session = self.Session()
+        try:
+            active = session.query(ActiveTrade).all()
+            current_invested = sum([t.total_cost for t in active])
+            remaining = self.max_budget - current_invested
+
+            if required_amount > remaining:
+                self.log(f"⛔ Order Skipped: Budget Limit Reached (Req: €{required_amount:.2f}, Rem: €{remaining:.2f})")
+                return False
+            return True
+        finally:
+            session.close()
+
     def execute_buy(self, symbol, amount_eur, reason):
+        # 0. Check Budget
+        if not self.check_budget(amount_eur):
+            return
+
         # 1. Get step size
         info = self.exchange_info.get(symbol, {'step_size': 0.00001, 'min_notional': 5.0})
 
@@ -318,16 +339,14 @@ class MarkBot:
 
     def execute_safety_order(self, trade, current_price):
         symbol = trade.symbol
-        # Calculate Size: Base * (Scale ^ Count) ?
-        # Or Previous Order * Scale?
-        # Requirement: "Multiplier 1.5x of the previous order size"
-        # We need to know previous order size.
-        # For simplicity/robustness, let's calculate based on base_order * (scale ^ count)
-        # Count starts at 0 (Base). So SO #1 (count 0 -> 1) is Base * 1.5^1?
 
-        # Let's say Base=50. SO1 = 50*1.5=75. SO2 = 75*1.5=112.5.
+        # Calculate Size
         next_count = trade.safety_order_count + 1
         size_eur = self.base_order_size * (self.dca_volume_scale ** next_count)
+
+        # Check Budget
+        if not self.check_budget(size_eur):
+            return
 
         self.log(f"🛡️ Safety Order #{next_count} for {symbol} ({size_eur:.2f}€)")
 
