@@ -23,6 +23,10 @@ class MarkBot:
         self.api_key = api_key
         self.api_secret = api_secret
 
+        # Validate API Key format
+        if not api_key or len(api_key) < 64 or ' ' in api_key:
+             print("❌ CRITICAL: Invalid BINANCE_API_KEY format detected in .env!")
+
         # Database
         self.db_manager = DatabaseManager()
         self.Session = scoped_session(self.db_manager.Session)
@@ -435,16 +439,24 @@ class MarkBot:
         session = self.Session()
         trade = session.query(ActiveTrade).filter_by(symbol=symbol).first()
         if trade:
-            # We call execute_sell directly.
-            # Note: execute_sell needs 'trade' object. If we pass the one from this session,
-            # and execute_sell creates its own session to delete, it might conflict if not handled.
-            # In my implementation execute_sell creates a NEW session for DB ops.
-            # So we should pass a detached object or handle session carefully.
-            # Best to just pass the data object, but execute_sell needs to delete by symbol.
-
             current_price = self.get_current_price_fast(symbol)
             self.execute_sell(trade, current_price, "Manual Force Close")
         session.close()
+
+    def forget_trade(self, symbol):
+        # Remove from DB only (Fix for ghost trades)
+        session = self.Session()
+        try:
+            trade = session.query(ActiveTrade).filter_by(symbol=symbol).first()
+            if trade:
+                session.delete(trade)
+                session.commit()
+                self.log(f"🗑️ Forgot Trade (DB Only): {symbol}")
+        except Exception as e:
+            session.rollback()
+            self.log(f"Forget Error: {e}")
+        finally:
+            session.close()
 
     def sweep_dust(self):
         # Identify dust and convert to BNB
