@@ -224,9 +224,9 @@ def chart_data():
             pct_gain = (running_pnl / 1000.0) * 100
             bot_equity.append(pct_gain)
 
-        # 3. Fetch BTC Benchmark
+        # 3. Fetch Benchmarks for all Whitelisted Assets
         # We need daily klines from first_date to now
-        btc_benchmark = []
+        benchmarks = {}
         try:
             # Convert start date to TS
             dt_obj = datetime.strptime(first_date, "%Y-%m-%d")
@@ -234,51 +234,62 @@ def chart_data():
 
             # Use a fresh client for this request to avoid conflict
             client = Spot() # Public data doesn't need keys
-            klines = client.klines("BTCEUR", "1d", startTime=start_ts, limit=1000)
 
-            # Map Date -> Close Price
-            btc_prices = {}
-            base_price = None
+            # Iterate over all coins in whitelist
+            for coin in bot.whitelist:
+                symbol = f"{coin}EUR"
+                try:
+                    klines = client.klines(symbol, "1d", startTime=start_ts, limit=1000)
 
-            for k in klines:
-                # k[0] is Open Time
-                k_date = datetime.fromtimestamp(k[0]/1000).strftime('%Y-%m-%d')
-                close_p = float(k[4])
-                btc_prices[k_date] = close_p
+                    # Map Date -> Close Price
+                    prices = {}
+                    base_price = None
 
-                # Determine Base Price (Open price of first day)
-                if k_date == first_date and base_price is None:
-                    base_price = float(k[1]) # Open
+                    for k in klines:
+                        # k[0] is Open Time
+                        k_date = datetime.fromtimestamp(k[0]/1000).strftime('%Y-%m-%d')
+                        close_p = float(k[4])
+                        prices[k_date] = close_p
 
-            # Fallback
-            if base_price is None and klines:
-                base_price = float(klines[0][1])
+                        # Determine Base Price (Open price of first day)
+                        if k_date == first_date and base_price is None:
+                            base_price = float(k[1]) # Open
 
-            # Generate Benchmark Data for each trade date
-            if base_price:
-                for d in dates:
-                    # Find closest price
-                    price = btc_prices.get(d)
-                    # If date missing in BTC (e.g. today not closed), use last known
-                    if not price and btc_prices:
-                        price = list(btc_prices.values())[-1]
+                    # Fallback
+                    if base_price is None and klines:
+                        base_price = float(klines[0][1])
 
-                    if price:
-                        pct = ((price - base_price) / base_price) * 100
-                        btc_benchmark.append(pct)
+                    # Generate Benchmark Data for each trade date
+                    series = []
+                    if base_price:
+                        for d in dates:
+                            # Find closest price
+                            price = prices.get(d)
+                            # If date missing (e.g. today not closed), use last known
+                            if not price and prices:
+                                price = list(prices.values())[-1]
+
+                            if price:
+                                pct = ((price - base_price) / base_price) * 100
+                                series.append(pct)
+                            else:
+                                series.append(0.0)
                     else:
-                         btc_benchmark.append(0.0)
-            else:
-                 btc_benchmark = [0.0] * len(dates)
+                        series = [0.0] * len(dates)
+
+                    benchmarks[coin] = series
+
+                except Exception as inner_e:
+                    print(f"Benchmark Error for {coin}: {inner_e}")
+                    benchmarks[coin] = [0.0] * len(dates)
 
         except Exception as e:
             print(f"Benchmark Error: {e}")
-            btc_benchmark = [0.0] * len(dates)
 
         return jsonify({
             'dates': dates,
             'bot_pct': bot_equity,
-            'btc_pct': btc_benchmark
+            'benchmarks': benchmarks
         })
     finally:
         session.close()

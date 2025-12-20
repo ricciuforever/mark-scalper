@@ -222,34 +222,46 @@
                     gradient.addColorStop(0, 'rgba(40, 167, 69, 0.5)');   // Green opaque
                     gradient.addColorStop(1, 'rgba(40, 167, 69, 0.0)');   // Transparent
 
+                    // Fixed Colors for Benchmarks (Gold, Purple, Blue, Cyan, Magenta, White)
+                    const benchColors = ['#ffc107', '#6f42c1', '#0d6efd', '#0dcaf0', '#d63384', '#f8f9fa', '#20c997'];
+
                     if (!perfChart) {
+                        const datasets = [
+                            {
+                                label: 'Mark V2 (%)',
+                                data: data.bot_pct,
+                                borderColor: '#28a745',
+                                backgroundColor: gradient,
+                                fill: true,
+                                borderWidth: 3,
+                                pointRadius: 0,
+                                pointHoverRadius: 5,
+                                tension: 0.1
+                            }
+                        ];
+
+                        // Add Benchmarks
+                        let i = 0;
+                        for (const [coin, series] of Object.entries(data.benchmarks)) {
+                            datasets.push({
+                                label: `${coin} Hold (%)`,
+                                data: series,
+                                borderColor: benchColors[i % benchColors.length],
+                                borderDash: [5, 5],
+                                borderWidth: 1,
+                                pointRadius: 0,
+                                pointHoverRadius: 5,
+                                tension: 0.1,
+                                fill: false
+                            });
+                            i++;
+                        }
+
                         perfChart = new Chart(ctx, {
                             type: 'line',
                             data: {
                                 labels: data.dates,
-                                datasets: [
-                                    {
-                                        label: 'Mark V2 (%)',
-                                        data: data.bot_pct,
-                                        borderColor: '#28a745',
-                                        backgroundColor: gradient,
-                                        fill: true,
-                                        borderWidth: 3,
-                                        pointRadius: 0,
-                                        pointHoverRadius: 5,
-                                        tension: 0.1
-                                    },
-                                    {
-                                        label: 'BTC Buy & Hold (%)',
-                                        data: data.btc_pct,
-                                        borderColor: '#ffc107',
-                                        borderDash: [5, 5],
-                                        borderWidth: 2,
-                                        pointRadius: 0,
-                                        pointHoverRadius: 5,
-                                        tension: 0.1
-                                    }
-                                ]
+                                datasets: datasets
                             },
                             options: {
                                 responsive: true,
@@ -274,7 +286,30 @@
                     } else {
                         perfChart.data.labels = data.dates;
                         perfChart.data.datasets[0].data = data.bot_pct;
-                        perfChart.data.datasets[1].data = data.btc_pct;
+
+                        // Update Benchmarks (assuming whitelist doesn't change runtime)
+                        // If we have dynamic number of datasets, easier to just recreate chart or map them carefully.
+                        // For simplicity, we'll try to update if lengths match, else recreate.
+
+                        const botDataset = perfChart.data.datasets[0];
+                        // Rebuild datasets
+                        const newDatasets = [botDataset];
+                        let i = 0;
+                        for (const [coin, series] of Object.entries(data.benchmarks)) {
+                            newDatasets.push({
+                                label: `${coin} Hold (%)`,
+                                data: series,
+                                borderColor: benchColors[i % benchColors.length],
+                                borderDash: [5, 5],
+                                borderWidth: 1,
+                                pointRadius: 0,
+                                pointHoverRadius: 5,
+                                tension: 0.1,
+                                fill: false
+                            });
+                            i++;
+                        }
+                        perfChart.data.datasets = newDatasets;
                         perfChart.update();
                     }
                 });
