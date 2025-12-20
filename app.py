@@ -219,9 +219,13 @@ def chart_data():
         # 2. Build Bot Equity Curve
         bot_equity = []
         running_pnl = 0
+
+        # Use max_budget as initial capital basis
+        start_capital = bot.max_budget if bot.max_budget > 0 else 500.0
+
         for d in dates:
             running_pnl += daily_pnl[d]
-            pct_gain = (running_pnl / 1000.0) * 100
+            pct_gain = (running_pnl / start_capital) * 100
             bot_equity.append(pct_gain)
 
         # 3. Fetch Benchmarks for all Whitelisted Assets
