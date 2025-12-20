@@ -96,6 +96,13 @@ class MarkBot:
     # --- WebSocket Handling ---
     def start(self):
         if self.running: return
+
+        # 0. Sync Wallet positions (Adopt orphans)
+        try:
+            self.sync_wallet_positions()
+        except Exception as e:
+            self.log(f"Sync Error: {e}")
+
         self.running = True
         self.log("Mark V2 Starting...")
 
@@ -109,6 +116,58 @@ class MarkBot:
             self.ws_client.kline(symbol=symbol, interval='1m')
 
         threading.Thread(target=self._run_async_loop, daemon=True).start()
+
+    def sync_wallet_positions(self):
+        """Checks Binance wallet for assets that are not in DB and adopts them."""
+        self.log("🔄 Syncing Wallet...")
+        try:
+            # Get real balances
+            acc = self.client.account()
+            balances = {b['asset']: float(b['free']) + float(b['locked']) for b in acc['balances']}
+
+            session = self.Session()
+            active_symbols = [t.symbol for t in session.query(ActiveTrade).all()]
+
+            for coin in self.whitelist:
+                symbol = f"{coin}{self.quote_currency}"
+                qty = balances.get(coin, 0.0)
+
+                # Check value > 1 EUR (approx) to skip dust
+                # We need a price estimation.
+                price = self.get_current_price_fast(symbol)
+                if price == 0:
+                    # Fallback to ticker
+                    try:
+                        price = float(self.client.ticker_price(symbol)['price'])
+                    except:
+                        continue
+
+                value = qty * price
+
+                # If significant value found AND not in DB
+                if value > 1.0 and symbol not in active_symbols:
+                    self.log(f"♻️ Found orphan position in wallet: {symbol} ({qty:.4f} | {value:.2f}€). Adopting.")
+
+                    # Create Active Trade
+                    trade = ActiveTrade(
+                        symbol=symbol,
+                        entry_price=price, # Use current price as entry
+                        quantity=qty,
+                        current_price=price,
+                        safety_order_count=0,
+                        highest_price=price,
+                        base_order_price=price,
+                        total_cost=value,
+                        next_safety_order_price=price * (1 - self.dca_step_scale),
+                        is_dust=False
+                    )
+                    session.add(trade)
+                    session.commit()
+
+            session.close()
+        except Exception as e:
+            self.log(f"Wallet Sync Failed: {e}")
+            if 'session' in locals(): session.close()
 
     def stop(self):
         self.running = False
