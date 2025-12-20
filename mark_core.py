@@ -272,7 +272,7 @@ class MarkBot:
                     trade = active_trades[symbol]
                     self.manage_active_trade(session, trade, current_price)
                 else:
-                    self.scan_for_entry(symbol, last_candle)
+                    self.scan_for_entry(symbol, last_candle, session)
 
             session.commit()
         except Exception as e:
@@ -281,12 +281,12 @@ class MarkBot:
         finally:
             session.close()
 
-    def scan_for_entry(self, symbol, candle):
+    def scan_for_entry(self, symbol, candle, session=None):
         # Entry Condition: RSI < 30 AND Price < Lower BB
         if pd.isna(candle['rsi']) or pd.isna(candle['lower_bb']): return
 
         if candle['rsi'] < 30 and candle['close'] < candle['lower_bb']:
-            self.execute_buy(symbol, self.base_order_size, "Initial Entry")
+            self.execute_buy(symbol, self.base_order_size, "Initial Entry", session)
 
     def manage_active_trade(self, session, trade, current_price):
         # Update current price in DB
@@ -303,7 +303,7 @@ class MarkBot:
         tp_price = avg_price * (1 + self.tp_percent)
 
         if current_price >= tp_price:
-            self.execute_sell(trade, current_price, "Take Profit")
+            self.execute_sell(trade, current_price, "Take Profit", session)
             return
 
         # 2. Safety Orders (DCA)
@@ -316,19 +316,23 @@ class MarkBot:
 
         if trade.safety_order_count < self.max_safety_orders:
             if current_price <= trade.next_safety_order_price:
-                self.execute_safety_order(trade, current_price)
+                self.execute_safety_order(trade, current_price, session)
                 return
 
         # 3. Hard Stop Loss
         # Only if price drops significantly below (e.g. 10%) total avg price
         stop_price = avg_price * (1 - self.safety_sl_percent)
         if current_price <= stop_price:
-            self.execute_sell(trade, current_price, "Hard Stop Loss")
+            self.execute_sell(trade, current_price, "Hard Stop Loss", session)
             return
 
-    def check_budget(self, required_amount):
+    def check_budget(self, required_amount, session=None):
         """Checks if spending 'required_amount' exceeds max_budget."""
-        session = self.Session()
+        close_session = False
+        if session is None:
+            session = self.Session()
+            close_session = True
+
         try:
             active = session.query(ActiveTrade).all()
             current_invested = sum([t.total_cost for t in active])
@@ -339,11 +343,12 @@ class MarkBot:
                 return False
             return True
         finally:
-            session.close()
+            if close_session:
+                session.close()
 
-    def execute_buy(self, symbol, amount_eur, reason):
+    def execute_buy(self, symbol, amount_eur, reason, session=None):
         # 0. Check Budget
-        if not self.check_budget(amount_eur):
+        if not self.check_budget(amount_eur, session):
             return
 
         # 1. Get step size
@@ -371,7 +376,11 @@ class MarkBot:
             avg_fill_price = spent_eur / filled_qty
 
             # Save to DB
-            session = self.Session()
+            close_session = False
+            if session is None:
+                session = self.Session()
+                close_session = True
+
             try:
                 trade = ActiveTrade(
                     symbol=symbol,
@@ -385,18 +394,23 @@ class MarkBot:
                     next_safety_order_price=avg_fill_price * (1 - self.dca_step_scale)
                 )
                 session.add(trade)
+                # If we own the session, we commit. If not, the caller commits?
+                # Actually, for trade execution, we often want immediate commit to avoid race conditions?
+                # But if we commit here, we might break the transaction of the caller if it wanted atomicity?
+                # In this bot, we treat each order as atomic.
                 session.commit()
                 self.log(f"✅ Position Opened {symbol}")
             except Exception as db_e:
                 session.rollback()
                 self.log(f"DB Error on Buy: {db_e}")
             finally:
-                session.close()
+                if close_session:
+                    session.close()
 
         except Exception as e:
             self.log(f"❌ Buy Failed {symbol}: {e}")
 
-    def execute_safety_order(self, trade, current_price):
+    def execute_safety_order(self, trade, current_price, session=None):
         symbol = trade.symbol
 
         # Calculate Size
@@ -404,7 +418,7 @@ class MarkBot:
         size_eur = self.base_order_size * (self.dca_volume_scale ** next_count)
 
         # Check Budget
-        if not self.check_budget(size_eur):
+        if not self.check_budget(size_eur, session):
             return
 
         self.log(f"🛡️ Safety Order #{next_count} for {symbol} ({size_eur:.2f}€)")
@@ -420,8 +434,9 @@ class MarkBot:
             spent_eur = float(order['cummulativeQuoteQty'])
 
             # Update Trade in DB
-            # We are inside manage_active_trade which holds a session, but trade object might be detached?
-            # It was passed from manage_active_trade, so it's attached.
+            # Ensure trade is attached to current session if it was passed
+            if session and trade not in session:
+                trade = session.merge(trade)
 
             trade.quantity += filled_qty
             trade.total_cost += spent_eur
@@ -433,13 +448,16 @@ class MarkBot:
             # Update Next Target
             trade.next_safety_order_price = trade.entry_price * (1 - self.dca_step_scale)
 
+            if session:
+                session.commit()
+
             self.log(f"✅ DCA Executed {symbol}. New Avg: {trade.entry_price:.4f}")
 
         except Exception as e:
             self.log(f"❌ DCA Failed {symbol}: {e}")
             # Could prevent retrying immediately by checking time or setting error flag
 
-    def execute_sell(self, trade, price, reason):
+    def execute_sell(self, trade, price, reason, session=None):
         symbol = trade.symbol
         qty = trade.quantity
 
@@ -466,10 +484,20 @@ class MarkBot:
             pnl_pct = (net_pnl / trade.total_cost) * 100
 
             # Archive
-            session = self.Session()
+            close_session = False
+            if session is None:
+                session = self.Session()
+                close_session = True
+
             try:
                 # Delete active
-                session.query(ActiveTrade).filter_by(symbol=symbol).delete()
+                # If trade is not attached, query it again or merge?
+                # If we have session, we can just delete trade if attached?
+                if trade not in session:
+                    # session.delete expects an attached instance or we can query
+                    session.query(ActiveTrade).filter_by(symbol=symbol).delete()
+                else:
+                    session.delete(trade)
 
                 # Add history
                 hist = TradeHistory(
@@ -489,28 +517,39 @@ class MarkBot:
                 self.log(f"DB Error Archive: {e}")
                 session.rollback()
             finally:
-                session.close()
+                if close_session:
+                    session.close()
 
         except Exception as e:
             self.log(f"❌ Sell Failed {symbol}: {e}")
             # Check for dust
             if "Account has insufficient balance" in str(e) or "Filter failure: LOT_SIZE" in str(e):
-                self.handle_dust_error(trade)
+                self.handle_dust_error(trade, session)
 
-    def handle_dust_error(self, trade):
+    def handle_dust_error(self, trade, session=None):
         # Mark as dust or remove if value is tiny
         val = trade.quantity * trade.current_price
         if val < 5.0:
-            session = self.Session()
+            close_session = False
+            if session is None:
+                session = self.Session()
+                close_session = True
+
             try:
-                t = session.query(ActiveTrade).filter_by(symbol=trade.symbol).first()
+                # Re-query if necessary or use merge
+                if trade not in session:
+                    t = session.query(ActiveTrade).filter_by(symbol=trade.symbol).first()
+                else:
+                    t = trade
+
                 if t:
                     t.is_dust = True
                     t.last_error = "Dust/MinNotional"
                 session.commit()
                 self.log(f"⚠️ Marked {trade.symbol} as Dust")
             finally:
-                session.close()
+                if close_session:
+                    session.close()
 
     def force_close(self, symbol):
         # Manually sell
@@ -518,7 +557,8 @@ class MarkBot:
         trade = session.query(ActiveTrade).filter_by(symbol=symbol).first()
         if trade:
             current_price = self.get_current_price_fast(symbol)
-            self.execute_sell(trade, current_price, "Manual Force Close")
+            # Use the local session
+            self.execute_sell(trade, current_price, "Manual Force Close", session)
         session.close()
 
     def forget_trade(self, symbol):
