@@ -401,6 +401,7 @@ class MarkBot:
             return
 
         try:
+            amount_eur = round(amount_eur, 2)
             self.log(f"🛒 BUY {symbol} ({amount_eur}€) - {reason}")
             # Real Order
             order = self.client.new_order(symbol=symbol, side='BUY', type='MARKET', quoteOrderQty=amount_eur)
@@ -476,6 +477,7 @@ class MarkBot:
         quantity = round_step_size(quantity, info['step_size'])
         
         try:
+            size_eur = round(size_eur, 2)
             order = self.client.new_order(symbol=symbol, side='BUY', type='MARKET', quoteOrderQty=size_eur)
             
             filled_qty = float(order['executedQty'])
