@@ -219,6 +219,11 @@ def chart_data():
 
         dates = sorted(list(daily_pnl.keys()))
 
+        # Ensure "Today" is included in the chart to show real-time benchmark
+        today_str = datetime.utcnow().strftime('%Y-%m-%d')
+        if dates and dates[-1] < today_str:
+            dates.append(today_str)
+
         # 2. Build Bot Equity Curve
         bot_equity = []
         running_pnl = 0
@@ -227,7 +232,7 @@ def chart_data():
         start_capital = bot.max_budget if bot.max_budget > 0 else 500.0
 
         for d in dates:
-            running_pnl += daily_pnl[d]
+            running_pnl += daily_pnl.get(d, 0)
             pct_gain = (running_pnl / start_capital) * 100
             bot_equity.append(pct_gain)
 
