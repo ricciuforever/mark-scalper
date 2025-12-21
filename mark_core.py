@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import threading
+import time
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -45,6 +46,7 @@ class MarkBot:
         self.status_message = "Initializing..."
         self.logs = []
         self.cache_lock = threading.Lock()
+        self.so_retry_cooldown = {} # {symbol: timestamp}
         
         # Strategy Config
         self.base_order_size = 50.0
@@ -449,6 +451,11 @@ class MarkBot:
     def execute_safety_order(self, trade, current_price, session=None):
         symbol = trade.symbol
         
+        # Check Cooldown (prevent log spam)
+        last_attempt = self.so_retry_cooldown.get(symbol, 0)
+        if time.time() - last_attempt < 60:
+            return
+
         # Calculate Size
         next_count = trade.safety_order_count + 1
         size_eur = self.base_order_size * (self.dca_volume_scale ** next_count)
@@ -469,6 +476,7 @@ class MarkBot:
                 size_eur = available * 0.99 # Leave 1% buffer
             else:
                 self.log(f"⛔ SO Skipped: Insufficient Wallet Funds (Req: {size_eur:.2f}€, Avail: {available:.2f}€)")
+                self.so_retry_cooldown[symbol] = time.time()
                 return
 
         self.log(f"🛡️ Safety Order #{next_count} for {symbol} ({size_eur:.2f}€)")
@@ -502,10 +510,14 @@ class MarkBot:
                 session.commit()
             
             self.log(f"✅ DCA Executed {symbol}. New Avg: {trade.entry_price:.4f}")
+            # Clear cooldown on success
+            if symbol in self.so_retry_cooldown:
+                del self.so_retry_cooldown[symbol]
             
         except Exception as e:
             self.log(f"❌ DCA Failed {symbol}: {e}")
-            # Could prevent retrying immediately by checking time or setting error flag
+            # Set cooldown on API failure too
+            self.so_retry_cooldown[symbol] = time.time()
 
     def execute_sell(self, trade, price, reason, session=None):
         symbol = trade.symbol

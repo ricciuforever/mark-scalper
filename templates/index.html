@@ -218,8 +218,12 @@
 
         function updateChart() {
             fetch('/api/chart')
-                .then(r => r.json())
+                .then(r => {
+                    if (!r.ok) throw new Error(r.statusText);
+                    return r.json();
+                })
                 .then(data => {
+                    if (!data) return;
                     const ctx = document.getElementById('performanceChart').getContext('2d');
 
                     // Gradient Fill for Mark V2
@@ -247,9 +251,10 @@
 
                         // Add Benchmarks
                         let i = 0;
-                        for (const [coin, series] of Object.entries(data.benchmarks)) {
-                            datasets.push({
-                                label: `${coin} Hold (%)`,
+                        if (data.benchmarks) {
+                            for (const [coin, series] of Object.entries(data.benchmarks)) {
+                                datasets.push({
+                                    label: `${coin} Hold (%)`,
                                 data: series,
                                 borderColor: benchColors[i % benchColors.length],
                                 borderDash: [5, 5],
@@ -300,9 +305,10 @@
                         // Rebuild datasets
                         const newDatasets = [botDataset];
                         let i = 0;
-                        for (const [coin, series] of Object.entries(data.benchmarks)) {
-                            newDatasets.push({
-                                label: `${coin} Hold (%)`,
+                        if (data.benchmarks) {
+                            for (const [coin, series] of Object.entries(data.benchmarks)) {
+                                newDatasets.push({
+                                    label: `${coin} Hold (%)`,
                                 data: series,
                                 borderColor: benchColors[i % benchColors.length],
                                 borderDash: [5, 5],
@@ -317,7 +323,8 @@
                         perfChart.data.datasets = newDatasets;
                         perfChart.update();
                     }
-                });
+                })
+                .catch(e => console.error("Chart Error:", e));
         }
 
         function controlBot(action) {
