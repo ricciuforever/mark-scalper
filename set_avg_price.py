@@ -39,7 +39,6 @@ def set_avg_price():
         print(f"✅ Updated {symbol}:")
         print(f"   Entry Price: {old_price:.4f} -> {new_price:.4f}")
         print(f"   Total Cost:  {old_cost:.2f}€ -> {trade.total_cost:.2f}€")
-        print(f"✅ Updated {symbol} Entry Price: {old_price:.4f} -> {new_price:.4f}")
         print("Restart the bot to see correct PnL.")
 
     except Exception as e:
