@@ -92,6 +92,8 @@ def status():
                 'entry_price': t.entry_price,
                 'quantity': t.quantity,
                 'current_price': current_p,
+                'current_value': val,
+                'total_cost': t.total_cost,
                 'pnl_abs': pnl,
                 'pnl_pct': pnl_pct,
                 'safety_orders': t.safety_order_count,
@@ -135,6 +137,7 @@ def status():
         return jsonify({
             'running': bot.running,
             'status': bot.status_message,
+            'max_safety_orders': bot.max_safety_orders,
             'active_trades': trades_data,
             'history': history_data,
             'total_balance': total_balance,

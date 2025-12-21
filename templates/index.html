@@ -80,6 +80,7 @@
                             <thead>
                                 <tr>
                                     <th>Symbol</th>
+                                    <th>Value</th>
                                     <th>Price / Entry</th>
                                     <th>PnL</th>
                                     <th>DCA Status</th>
@@ -169,6 +170,10 @@
                             <tr>
                                 <td>${t.symbol}</td>
                                 <td>
+                                    <div>${t.current_value.toFixed(2)}€</div>
+                                    <small class="text-muted">Inv: ${t.total_cost.toFixed(2)}€</small>
+                                </td>
+                                <td>
                                     <div>${t.current_price.toFixed(4)}</div>
                                     <small class="text-muted">${t.entry_price.toFixed(4)}</small>
                                 </td>
@@ -177,7 +182,7 @@
                                     <small>${t.pnl_pct.toFixed(2)}%</small>
                                 </td>
                                 <td>
-                                    <span class="badge bg-info text-dark">SO: ${t.safety_orders}</span><br>
+                                    <span class="badge bg-info text-dark">SO: ${t.safety_orders} / ${data.max_safety_orders}</span><br>
                                     <small class="text-muted">Next: ${t.next_so_price.toFixed(4)}</small>
                                 </td>
                                 <td>${t.tp_price.toFixed(4)}</td>
