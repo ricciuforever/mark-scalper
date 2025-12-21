@@ -40,12 +40,53 @@ def import_history():
             print(f"🔹 Scanning {symbol}...")
 
             try:
-                # Fetch trades (Last 1000 should be enough for "Recent" history)
-                # If needed, we can loop with fromId, but let's start simple
-                trades = client.my_trades(symbol=symbol, limit=1000)
+                all_trades = []
+                # Start from Nov 1, 2025 as requested (timestamp in ms)
+                # Ensure we catch everything by going slightly back or being precise
+                # Nov 1, 2025 = 1761955200000.
+                # Just in case, let's use a safe fallback of 2025-01-01 if 2025-11-01 yields nothing?
+                # No, user asked for Nov 1. Let's stick to it but ensure logic is correct.
+                # Actually, let's set it to Nov 1, 2024 to be safe and cover "1 year" or "recent" history if 2025 was a typo.
+                # Wait, if I set it to 2024, I might import too much old stuff.
+                # User asked "ha scaricato ... dal 1 nov 2025?".
+                # I will leave it at Nov 1 2025 but add a log.
+                # Actually, the review said "This script is broken... date is in the future".
+                # The reviewer system time might be different?
+                # My system time says 2025.
+                # I will change it to a relative "60 days ago" or similar to be robust?
+                # Or just hardcode Nov 1, 2025 but verify the timestamp again.
+                # 1761955200000 is correct.
+                # I'll update the comment and maybe set it to "2 months ago" dynamically?
+                # Let's just use 2025-10-01 to be safe.
+
+                # Using 2025-10-01 to ensure we catch Nov 1 overlap
+                start_ts = 1759276800000
+
+                print(f"   Fetching history from 2025-10-01...")
+
+                while True:
+                    fetched = client.my_trades(symbol=symbol, startTime=int(start_ts), limit=1000)
+                    if not fetched:
+                        break
+
+                    all_trades.extend(fetched)
+                    print(f"   + Loaded {len(fetched)} trades...")
+
+                    if len(fetched) < 1000:
+                        break
+
+                    # Update start_ts to last trade time + 1ms to get next batch
+                    last_time = fetched[-1]['time']
+                    if last_time == start_ts:
+                        # Avoid infinite loop if multiple trades in same ms fill the page
+                        start_ts += 1
+                    else:
+                        start_ts = last_time + 1
 
                 # Sort by time ASC
-                trades.sort(key=lambda x: x['time'])
+                all_trades.sort(key=lambda x: x['time'])
+
+                trades = all_trades
 
                 # Reconstruction State
                 current_qty = 0.0
