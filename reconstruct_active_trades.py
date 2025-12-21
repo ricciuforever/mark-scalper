@@ -5,12 +5,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from binance.spot import Spot
 from database import DatabaseManager, ActiveTrade
+from collections import deque
 
 # Load .env
 load_dotenv()
 
 def reconstruct_active_trades():
-    print("--- Active Trades Reconstruction Tool ---")
+    print("--- Active Trades Reconstruction Tool (FIFO Inventory) ---")
 
     api_key = os.getenv('BINANCE_API_KEY')
     api_secret = os.getenv('BINANCE_API_SECRET')
@@ -23,6 +24,10 @@ def reconstruct_active_trades():
     db = DatabaseManager()
     session = db.get_session()
 
+    # User requested Start Date: Nov 1, 2025
+    START_TS = 1761955200000
+    print(f"📅 Analysis Start Date: {datetime.fromtimestamp(START_TS/1000)}")
+
     try:
         trades = session.query(ActiveTrade).all()
         if not trades:
@@ -31,114 +36,121 @@ def reconstruct_active_trades():
 
         for trade in trades:
             symbol = trade.symbol
-            target_qty = trade.quantity
-            print(f"\nScanning {symbol} (Target Qty: {target_qty})...")
+            db_qty = trade.quantity
+            print(f"\nScanning {symbol} (DB Qty: {db_qty})...")
 
             try:
-                # Fetch recent trades (Buy & Sell)
-                # We need enough history to cover the current position accumulation
-                # Start from 2024-01-01 to be safe, or just last 500 trades
-                # Using 500 limit is usually enough for a scalper
-                history = client.my_trades(symbol=symbol, limit=500)
-                history.sort(key=lambda x: x['time'], reverse=True) # Newest first
-
-                accumulated_qty = 0.0
-                accumulated_cost = 0.0
-                orders_count = 0
-                first_buy_time = None
-
-                # We look for the sequence of BUYs that make up the current position.
-                # If we hit a SELL that reduced position, we have to account for it?
-                # FIFO logic is standard.
-                # BUT, 'sync_wallet_positions' just looks at current balance.
-                # So we just need the weighted average of the "remaining" coins.
-                # This is equivalent to: iterating backwards, adding BUYs.
-                # If we encounter a SELL, it consumes the most recent BUYs? No, typically FIFO consumes oldest.
-                # However, for PnL calculation of a HOLDING, average price is usually calculated as:
-                # Average Price = Total Cost Basis / Total Quantity.
-
-                # Let's simplify:
-                # We want to find the last N Buy orders that sum up to `target_qty`.
-                # If there are Sells in between, it gets complicated (Trading logic).
-                # Assumption: The bot does DCA (Buys) and then Sells everything.
-                # So the current position is likely a chain of recent Buys WITHOUT Sells in between.
-                # If there were Sells, they likely closed previous cycles.
-
-                relevant_buys = []
-
-                for h in history:
-                    if h['isBuyer']:
-                        qty = float(h['qty'])
-                        price = float(h['price'])
-                        quote_qty = float(h['quoteQty'])
-
-                        relevant_buys.append({
-                            'qty': qty,
-                            'price': price,
-                            'cost': quote_qty,
-                            'time': h['time']
-                        })
-
-                        accumulated_qty += qty
-
-                        if accumulated_qty >= target_qty * 0.99: # 1% tolerance
-                            break
-                    else:
-                        # It's a SELL.
-                        # If we see a SELL, it means the current cycle likely started AFTER this sell.
-                        # (Unless it was a partial sell, but the bot usually sells 100%).
-                        # So, if we hit a SELL, we should probably stop if we haven't reached target yet?
-                        # Or maybe the position IS partial?
-                        # Let's assume standard Bot behavior: Sell closes position.
-                        # So any Buy before the last Sell belongs to a previous cycle.
-                        # We stop here.
-                        print(f"   Hit a SELL at {datetime.fromtimestamp(h['time']/1000)}. Assuming cycle start after this.")
+                # 1. Fetch ALL trades since start date
+                all_trades = []
+                # Pagination loop
+                fetch_ts = START_TS
+                while True:
+                    fetched = client.my_trades(symbol=symbol, startTime=int(fetch_ts), limit=1000)
+                    if not fetched:
                         break
+                    all_trades.extend(fetched)
+                    if len(fetched) < 1000:
+                        break
+                    # Next page
+                    last_time = fetched[-1]['time']
+                    if last_time == fetch_ts:
+                        fetch_ts += 1
+                    else:
+                        fetch_ts = last_time + 1
 
-                if not relevant_buys:
-                    print("   ⚠️ No recent BUYs found to match this position.")
+                all_trades.sort(key=lambda x: x['time']) # Oldest first
+
+                if not all_trades:
+                    print(f"   ⚠️ No trades found since start date.")
                     continue
 
-                # Now calculate weighted average of the relevant buys
-                # We might have collected more than needed in the last buy (partial fill logic)
-                # But for simplicity, if the sum is close, we use them all.
+                # 2. Simulate Inventory (FIFO)
+                # Queue stores tuples: (qty, cost, orderId, time)
+                inventory = deque()
 
-                final_cost = 0.0
-                final_qty = 0.0
+                for t in all_trades:
+                    qty = float(t['qty'])
+                    price = float(t['price'])
+                    cost = float(t['quoteQty'])
+                    order_id = t['orderId']
+                    ts = t['time']
 
-                for b in relevant_buys:
-                    final_cost += b['cost']
-                    final_qty += b['qty']
-                    first_buy_time = b['time'] # The last one in the loop is the oldest
+                    if t['isBuyer']:
+                        # Add to inventory
+                        inventory.append({
+                            'qty': qty,
+                            'cost': cost,
+                            'price': price,
+                            'orderId': order_id,
+                            'time': ts
+                        })
+                    else:
+                        # SELL - Remove from inventory (FIFO)
+                        qty_to_remove = qty
 
-                if final_qty == 0: continue
+                        while qty_to_remove > 0.00000001 and inventory:
+                            first_item = inventory[0]
 
-                avg_price = final_cost / final_qty
+                            if first_item['qty'] <= qty_to_remove:
+                                # Consume entire item
+                                qty_to_remove -= first_item['qty']
+                                inventory.popleft()
+                            else:
+                                # Partial consume
+                                fraction = qty_to_remove / first_item['qty']
+                                first_item['qty'] -= qty_to_remove
+                                first_item['cost'] -= (first_item['cost'] * fraction) # Reduce cost proportionally
+                                qty_to_remove = 0
 
-                # Update DB
-                old_price = trade.entry_price
-                trade.entry_price = avg_price
-                trade.total_cost = final_cost # This might slightly mismatch if target_qty != final_qty, but it's consistent with avg_price
+                # 3. Analyze Remaining Inventory
+                final_qty = sum(item['qty'] for item in inventory)
+                final_cost = sum(item['cost'] for item in inventory)
 
-                # Safety Orders:
-                # Base Order is #0. So Count = Total Orders - 1
-                so_count = max(0, len(relevant_buys) - 1)
-                trade.safety_order_count = so_count
+                print(f"   Calculated Inventory: {final_qty:.6f} (DB says {db_qty:.6f})")
 
-                # Entry Time
-                if first_buy_time:
-                    trade.entry_time = datetime.fromtimestamp(first_buy_time/1000)
+                # Validation
+                if final_qty < (db_qty * 0.9):
+                    print(f"   ⚠️ Mismatch: Calculated quantity is significantly lower than DB.")
+                    print("      This implies some coins were bought BEFORE Nov 1, 2025.")
+                    print("      Skipping update to avoid breaking cost basis.")
+                    continue
 
-                # Next SO Price
-                # Logic from bot: entry_price * (1 - step_scale)
-                # We assume standard 2% step
-                trade.next_safety_order_price = avg_price * 0.98
+                if final_qty == 0:
+                     print("   ⚠️ Calculated inventory is 0. Trade might be closed?")
+                     continue
 
+                # 4. Calculate Stats
+                weighted_avg_price = final_cost / final_qty
+
+                # Count distinct BUY Orders (Safety Orders)
+                # We look at the 'orderId's present in the inventory
+                unique_order_ids = set(item['orderId'] for item in inventory)
+                total_orders = len(unique_order_ids)
+
+                # Safety Order Count = Total Orders - 1 (Base Order)
+                so_count = max(0, total_orders - 1)
+
+                # Find Entry Time (Time of the oldest order in inventory)
+                if inventory:
+                    entry_ts = inventory[0]['time']
+                    entry_dt = datetime.fromtimestamp(entry_ts/1000)
+                else:
+                    entry_dt = datetime.utcnow()
+
+                # 5. Update DB
                 print(f"   ✅ RECONSTRUCTED:")
-                print(f"      Avg Price: {old_price:.4f} -> {avg_price:.4f}")
-                print(f"      Total Cost: {final_cost:.2f}€")
-                print(f"      Safety Orders: {so_count}")
-                print(f"      Date: {trade.entry_time}")
+                print(f"      Avg Price: {trade.entry_price:.4f} -> {weighted_avg_price:.4f}")
+                print(f"      Total Cost: {trade.total_cost:.2f}€ -> {final_cost:.2f}€")
+                print(f"      Safety Orders: {trade.safety_order_count} -> {so_count}")
+
+                trade.entry_price = weighted_avg_price
+                trade.total_cost = final_cost
+                trade.safety_order_count = so_count
+                trade.entry_time = entry_dt
+
+                # Update Next SO Target based on new Avg
+                # Default 2% step
+                trade.next_safety_order_price = weighted_avg_price * 0.98
 
             except Exception as e:
                 print(f"   ❌ Error scanning {symbol}: {e}")
