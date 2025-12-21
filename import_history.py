@@ -59,10 +59,11 @@ def import_history():
                 # I'll update the comment and maybe set it to "2 months ago" dynamically?
                 # Let's just use 2025-10-01 to be safe.
 
-                # Using 2025-10-01 to ensure we catch Nov 1 overlap
-                start_ts = 1759276800000
+                # Using Nov 1, 2025 as explicitly requested by user
+                # 2025-11-01 00:00:00 UTC = 1761955200000
+                start_ts = 1761955200000
 
-                print(f"   Fetching history from 2025-10-01...")
+                print(f"   Fetching history from 2025-11-01...")
 
                 while True:
                     fetched = client.my_trades(symbol=symbol, startTime=int(start_ts), limit=1000)
