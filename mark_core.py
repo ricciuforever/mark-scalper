@@ -58,6 +58,32 @@ class MarkBot:
         self.load_settings()
         self.update_exchange_info()
 
+    def preload_history(self):
+        self.log("📥 Preloading Market Data...")
+        for coin in self.whitelist:
+            symbol = f"{coin}{self.quote_currency}"
+            try:
+                # Fetch last 30 candles (need 20 for BB/MA)
+                klines = self.client.klines(symbol=symbol, interval='1m', limit=30)
+
+                data_list = []
+                for k in klines:
+                    data_list.append({
+                        'ts': pd.to_datetime(k[0], unit='ms'),
+                        'open': float(k[1]),
+                        'high': float(k[2]),
+                        'low': float(k[3]),
+                        'close': float(k[4]),
+                        'volume': float(k[5])
+                    })
+
+                df = pd.DataFrame(data_list)
+                with self.cache_lock:
+                    self.klines_cache[symbol] = df
+
+            except Exception as e:
+                self.log(f"⚠️ Preload Failed for {symbol}: {e}")
+
     def log(self, message):
         ts = datetime.now().strftime("%H:%M:%S")
         msg = f"[{ts}] {message}"
@@ -106,6 +132,9 @@ class MarkBot:
         self.running = True
         self.log("Mark V2 Starting...")
         
+        # Preload data to avoid waiting 20 mins
+        self.preload_history()
+
         self.ws_client = SpotWebsocketStreamClient(
             on_message=self.on_kline_message,
             is_combined=True
