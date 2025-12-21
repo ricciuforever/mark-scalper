@@ -100,7 +100,7 @@ class DatabaseManager:
                                 entry_price=trade.get('entry_price', 0.0),
                                 quantity=trade.get('quantity', 0.0),
                                 current_price=trade.get('current_price', 0.0),
-                                safety_order_count=0, # Treat as Base Order
+                                safety_order_count=int(trade.get('safety_order_count', 0)),
                                 highest_price=trade.get('highest_price', trade.get('entry_price', 0.0)),
                                 entry_time=et,
                                 is_dust=trade.get('is_dust', False),
