@@ -30,10 +30,15 @@ def set_avg_price():
         if trade.highest_price < new_price:
             trade.highest_price = new_price
 
-        # We should NOT touch quantity or cost, as those are synced from wallet.
-        # Changing entry price means the calculated PnL will change.
+        # Update Total Cost to match the corrected entry price
+        # Cost = Price * Quantity
+        old_cost = trade.total_cost
+        trade.total_cost = trade.quantity * new_price
 
         session.commit()
+        print(f"✅ Updated {symbol}:")
+        print(f"   Entry Price: {old_price:.4f} -> {new_price:.4f}")
+        print(f"   Total Cost:  {old_cost:.2f}€ -> {trade.total_cost:.2f}€")
         print(f"✅ Updated {symbol} Entry Price: {old_price:.4f} -> {new_price:.4f}")
         print("Restart the bot to see correct PnL.")
 

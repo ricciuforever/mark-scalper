@@ -376,9 +376,15 @@ class MarkBot:
                 session.close()
 
     def execute_buy(self, symbol, amount_eur, reason, session=None):
-        # 0. Check Budget
+        # 0. Check Budget (Strategy Cap)
         if not self.check_budget(amount_eur, session):
             return
+
+        # 0b. Check Wallet Balance (Physical Cap)
+        available = self.get_wallet_balance(self.quote_currency)
+        if available < amount_eur:
+             self.log(f"⛔ Buy Skipped: Insufficient Wallet Funds (Req: {amount_eur:.2f}€, Avail: {available:.2f}€)")
+             return
 
         # 1. Get step size
         info = self.exchange_info.get(symbol, {'step_size': 0.00001, 'min_notional': 5.0})
@@ -446,13 +452,26 @@ class MarkBot:
         next_count = trade.safety_order_count + 1
         size_eur = self.base_order_size * (self.dca_volume_scale ** next_count)
         
-        # Check Budget
+        # Check Budget (Strategy Cap)
         if not self.check_budget(size_eur, session):
             return
 
+        # Check Wallet Balance (Physical Cap)
+        available = self.get_wallet_balance(self.quote_currency)
+        info = self.exchange_info.get(symbol, {'step_size': 0.00001, 'min_notional': 5.0})
+
+        # Logic: If insufficient but close (>90%), use all available
+        if available < size_eur:
+            # Check if we can salvage the trade
+            if available > (size_eur * 0.90) and available > (info['min_notional'] * 1.1):
+                self.log(f"⚠️ Insufficient funds for full SO. Adjusting {size_eur:.2f}€ -> {available:.2f}€ (Using Remainder)")
+                size_eur = available * 0.99 # Leave 1% buffer
+            else:
+                self.log(f"⛔ SO Skipped: Insufficient Wallet Funds (Req: {size_eur:.2f}€, Avail: {available:.2f}€)")
+                return
+
         self.log(f"🛡️ Safety Order #{next_count} for {symbol} ({size_eur:.2f}€)")
         
-        info = self.exchange_info.get(symbol, {'step_size': 0.00001, 'min_notional': 5.0})
         quantity = size_eur / current_price
         quantity = round_step_size(quantity, info['step_size'])
         
@@ -635,4 +654,15 @@ class MarkBot:
         try:
             return float(self.client.ticker_price(symbol)['price'])
         except:
+            return 0.0
+
+    def get_wallet_balance(self, asset):
+        try:
+            acc = self.client.account()
+            for b in acc['balances']:
+                if b['asset'] == asset:
+                    return float(b['free'])
+            return 0.0
+        except Exception as e:
+            self.log(f"Balance Check Error: {e}")
             return 0.0
