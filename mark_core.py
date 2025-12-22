@@ -48,6 +48,7 @@ class MarkBot:
         self.cache_lock = threading.Lock()
         self.so_retry_cooldown = {} # {symbol: timestamp}
         self.last_ws_msg_time = time.time()
+        self.is_restarting = False
         
         # Strategy Config
         self.base_order_size = 50.0
@@ -153,34 +154,40 @@ class MarkBot:
         threading.Thread(target=self._run_async_loop, daemon=True).start()
 
     def restart_websocket(self):
+        if self.is_restarting: return
+        self.is_restarting = True
+
         self.log("⚠️ Restarting WebSocket Connection...")
         try:
-            if self.ws_client:
-                self.ws_client.stop()
-        except:
-            pass
+            try:
+                if self.ws_client:
+                    self.ws_client.stop()
+            except:
+                pass
 
-        # Clear cache to avoid gaps/artifacts, then reload
-        with self.cache_lock:
-            self.klines_cache.clear()
+            # Clear cache to avoid gaps/artifacts, then reload
+            with self.cache_lock:
+                self.klines_cache.clear()
 
-        self.preload_history()
+            self.preload_history()
 
-        try:
-            self.ws_client = SpotWebsocketStreamClient(
-                on_message=self.on_kline_message,
-                on_error=self.on_ws_error,
-                on_close=self.on_ws_close,
-                is_combined=True
-            )
-            for coin in self.whitelist:
-                symbol = f"{coin}{self.quote_currency}"
-                self.ws_client.kline(symbol=symbol, interval='1m')
+            try:
+                self.ws_client = SpotWebsocketStreamClient(
+                    on_message=self.on_kline_message,
+                    on_error=self.on_ws_error,
+                    on_close=self.on_ws_close,
+                    is_combined=True
+                )
+                for coin in self.whitelist:
+                    symbol = f"{coin}{self.quote_currency}"
+                    self.ws_client.kline(symbol=symbol, interval='1m')
 
-            self.last_ws_msg_time = time.time()
-            self.log("✅ WebSocket Restarted Successfully")
-        except Exception as e:
-            self.log(f"❌ WebSocket Restart Failed: {e}")
+                self.last_ws_msg_time = time.time()
+                self.log("✅ WebSocket Restarted Successfully")
+            except Exception as e:
+                self.log(f"❌ WebSocket Restart Failed: {e}")
+        finally:
+            self.is_restarting = False
 
     def sync_wallet_positions(self):
         """Checks Binance wallet for assets that are not in DB and adopts them."""
@@ -266,7 +273,9 @@ class MarkBot:
         self.log(f"⚠️ WebSocket Error: {error}")
 
     def on_ws_close(self, _):
-        self.log("⚠️ WebSocket Connection Closed")
+        if not self.is_restarting:
+            self.log("⚠️ WebSocket Closed Unexpectedly. Triggering immediate restart.")
+            self.last_ws_msg_time = 0 # Forces watchdog to trigger immediately
 
     def on_kline_message(self, _, msg):
         self.last_ws_msg_time = time.time()
