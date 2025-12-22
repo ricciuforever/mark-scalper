@@ -49,6 +49,7 @@ class MarkBot:
         self.so_retry_cooldown = {} # {symbol: timestamp}
         self.last_ws_msg_time = time.time()
         self.is_restarting = False
+        self.last_restart_time = 0
         
         # Strategy Config
         self.base_order_size = 50.0
@@ -155,7 +156,14 @@ class MarkBot:
 
     def restart_websocket(self):
         if self.is_restarting: return
+
+        # Cooldown Check (Prevent Loops)
+        if time.time() - self.last_restart_time < 60:
+             self.log("⚠️ Restart Cooldown Active. Waiting...")
+             return
+
         self.is_restarting = True
+        self.last_restart_time = time.time()
 
         self.log("⚠️ Restarting WebSocket Connection...")
         try:
