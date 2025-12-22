@@ -47,6 +47,7 @@ class MarkBot:
         self.logs = []
         self.cache_lock = threading.Lock()
         self.so_retry_cooldown = {} # {symbol: timestamp}
+        self.last_ws_msg_time = time.time()
         
         # Strategy Config
         self.base_order_size = 50.0
@@ -132,6 +133,7 @@ class MarkBot:
             self.log(f"Sync Error: {e}")
 
         self.running = True
+        self.last_ws_msg_time = time.time()
         self.log("Mark V2 Starting...")
         
         # Preload data to avoid waiting 20 mins
@@ -139,6 +141,8 @@ class MarkBot:
 
         self.ws_client = SpotWebsocketStreamClient(
             on_message=self.on_kline_message,
+            on_error=self.on_ws_error,
+            on_close=self.on_ws_close,
             is_combined=True
         )
         
@@ -147,6 +151,36 @@ class MarkBot:
             self.ws_client.kline(symbol=symbol, interval='1m')
         
         threading.Thread(target=self._run_async_loop, daemon=True).start()
+
+    def restart_websocket(self):
+        self.log("⚠️ Restarting WebSocket Connection...")
+        try:
+            if self.ws_client:
+                self.ws_client.stop()
+        except:
+            pass
+
+        # Clear cache to avoid gaps/artifacts, then reload
+        with self.cache_lock:
+            self.klines_cache.clear()
+
+        self.preload_history()
+
+        try:
+            self.ws_client = SpotWebsocketStreamClient(
+                on_message=self.on_kline_message,
+                on_error=self.on_ws_error,
+                on_close=self.on_ws_close,
+                is_combined=True
+            )
+            for coin in self.whitelist:
+                symbol = f"{coin}{self.quote_currency}"
+                self.ws_client.kline(symbol=symbol, interval='1m')
+
+            self.last_ws_msg_time = time.time()
+            self.log("✅ WebSocket Restarted Successfully")
+        except Exception as e:
+            self.log(f"❌ WebSocket Restart Failed: {e}")
 
     def sync_wallet_positions(self):
         """Checks Binance wallet for assets that are not in DB and adopts them."""
@@ -214,6 +248,13 @@ class MarkBot:
     async def main_loop(self):
         while self.running:
             try:
+                # Watchdog: Check for stale data (2 minutes)
+                if time.time() - self.last_ws_msg_time > 120:
+                    self.log("⚠️ Market Data Stale (>120s). Triggering Restart.")
+                    self.restart_websocket()
+                    # Reset timer to avoid immediate loop if restart takes time
+                    self.last_ws_msg_time = time.time()
+
                 self.check_strategies()
                 self.status_message = "Running - Monitoring Markets"
                 await asyncio.sleep(1)
@@ -221,7 +262,14 @@ class MarkBot:
                 self.log(f"Loop Error: {e}")
                 await asyncio.sleep(5)
 
+    def on_ws_error(self, _, error):
+        self.log(f"⚠️ WebSocket Error: {error}")
+
+    def on_ws_close(self, _):
+        self.log("⚠️ WebSocket Connection Closed")
+
     def on_kline_message(self, _, msg):
+        self.last_ws_msg_time = time.time()
         try:
             data = None
             if isinstance(msg, str):
@@ -268,6 +316,12 @@ class MarkBot:
         with self.cache_lock:
             df = self.klines_cache.get(symbol)
             if df is None or len(df) < 20: return None
+
+            # Stale Data Check (Safety Guard)
+            last_ts = df.iloc[-1]['ts']
+            if (datetime.utcnow() - last_ts).total_seconds() > 300: # 5 mins
+                return None
+
             df = df.copy()
         
         df['ma20'] = df['close'].rolling(window=20).mean()
